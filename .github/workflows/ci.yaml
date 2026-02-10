@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ['main']
+  pull_request:
+
+jobs:
+  test:
+    name: Test crates
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        name: Checkout repository
+      - uses: dtolnay/rust-toolchain@stable
+        name: Set up toolchain
+      - uses: taiki-e/install-action@cargo-llvm-cov
+        name: Install cargo llvm-cov
+      - uses: Swatinem/rust-cache@v2
+        name: Cache toolchain and dependencies
+      - run: cargo llvm-cov --workspace --all-features --no-cfg-coverage --lcov --output-path lcov.info
+        name: Run tests with coverage
+      - uses: codecov/codecov-action@v5
+        name: Upload coverage to Codecov
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+
+  lint:
+    name: Check code style
+
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        name: Checkout repository
+      - uses: dtolnay/rust-toolchain@master
+        name: Set up toolchain
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        name: Cache toolchain and dependencies
+      - run: cargo fmt --all -- --check
+        name: Check code with cargo fmt
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        name: Check code with cargo clippy

@@ -1,0 +1,31 @@
+[package]
+name = "reishi-quinn"
+description = "Noise IK handshake integration for quinn with QUIC key derivation"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+pq = ["reishi-handshake/pq"]
+
+[dependencies]
+reishi-handshake = { workspace = true }
+quinn-proto = { workspace = true }
+bytes = { workspace = true }
+chacha20 = { workspace = true }
+rand_core = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
