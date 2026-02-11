@@ -19,6 +19,11 @@ impl StaticSecret {
         Self(secret)
     }
 
+    /// Export the raw 32-byte secret key material.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+
     pub(crate) fn inner(&self) -> &DalekStaticSecret {
         &self.0
     }
@@ -86,6 +91,11 @@ impl KeyPair {
     /// Derives the corresponding public key automatically.
     pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
         Self::from_secret(StaticSecret::from_bytes(bytes))
+    }
+
+    /// Export the raw 32-byte secret key material.
+    pub fn secret_bytes(&self) -> [u8; 32] {
+        self.secret.to_bytes()
     }
 }
 
