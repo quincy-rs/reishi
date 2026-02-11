@@ -6,9 +6,12 @@ use crate::crypto::aead::AEAD_TAG_LEN;
 use crate::crypto::hash::{self, HASH_LEN};
 use crate::crypto::x25519::{self, DH_LEN};
 use crate::error::Error;
-use crate::symmetric_state::{PROTOCOL_NAME, SymmetricState};
+use crate::symmetric_state::SymmetricState;
+
+/// The Noise protocol name for the fixed ciphersuite.
+pub const PROTOCOL_NAME: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
+use crate::keys::{KeyPair, PublicKey, StaticSecret};
 use crate::transport::TransportState;
-use crate::types::{KeyPair, PublicKey, StaticSecret};
 
 /// The current action the caller must take to advance the handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

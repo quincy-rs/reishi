@@ -76,6 +76,20 @@ pub fn kem_generate(
     (seed_bytes, ek_bytes)
 }
 
+/// Derive the ML-KEM-768 encapsulation key from a decapsulation key seed.
+pub fn kem_ek_from_seed(seed_bytes: &[u8; KEM_SEED_LEN]) -> [u8; KEM_EK_LEN] {
+    let mut seed_copy = Zeroizing::new(*seed_bytes);
+    let seed: Seed = (*seed_copy).into();
+    seed_copy.zeroize();
+
+    let dk = ml_kem::DecapsulationKey::<MlKem768>::from_seed(seed);
+    let ek = dk.encapsulation_key();
+    let ek_exported = ek.to_bytes();
+    let mut ek_bytes = [0u8; KEM_EK_LEN];
+    ek_bytes.copy_from_slice(ek_exported.as_slice());
+    ek_bytes
+}
+
 /// Encapsulate a shared secret against a remote encapsulation key.
 ///
 /// Draws 32 bytes of randomness from `rng` for the encapsulation.

@@ -15,32 +15,20 @@
 
 pub mod crypto;
 pub mod error;
-pub mod types;
+pub mod keys;
 
 mod cipher_state;
 mod handshake;
 mod symmetric_state;
 mod transport;
 
-#[cfg(feature = "pq")]
-mod pq_handshake;
-#[cfg(feature = "pq")]
-pub mod pq_types;
-
 // Re-export the primary public API
 pub use error::Error;
-pub use handshake::{Handshake, HandshakeAction};
+pub use handshake::{Handshake, HandshakeAction, PROTOCOL_NAME};
+pub use keys::{KeyPair, PublicKey, StaticSecret};
 pub use transport::TransportState;
-pub use types::{KeyPair, PublicKey, StaticSecret};
 
 #[cfg(feature = "pq")]
-pub use pq_handshake::PqHandshake;
+pub use handshake::{PQ_PROTOCOL_NAME, PqHandshake};
 #[cfg(feature = "pq")]
-pub use pq_types::{PqKeyPair, PqPublicKey, PqStaticSecret};
-
-/// The Noise protocol name for the fixed ciphersuite.
-pub const PROTOCOL_NAME: &str = symmetric_state::PROTOCOL_NAME;
-
-/// The Noise protocol name for the hybrid PQ ciphersuite.
-#[cfg(feature = "pq")]
-pub const PQ_PROTOCOL_NAME: &str = pq_handshake::PQ_PROTOCOL_NAME;
+pub use keys::{HYBRID_SECRET_LEN, PqKeyPair, PqPublicKey, PqStaticSecret};

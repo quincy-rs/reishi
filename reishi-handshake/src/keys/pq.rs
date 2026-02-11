@@ -7,9 +7,12 @@
 use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::crypto::pq::{KEM_EK_LEN, KEM_SEED_LEN, kem_generate};
+use super::standard::{KeyPair, PublicKey, StaticSecret};
+use crate::crypto::pq::{KEM_EK_LEN, KEM_SEED_LEN, kem_ek_from_seed, kem_generate};
 use crate::crypto::x25519::DH_LEN;
-use crate::types::{KeyPair, PublicKey, StaticSecret};
+
+/// Total length of a hybrid secret key in bytes (X25519 + ML-KEM-768 seed).
+pub const HYBRID_SECRET_LEN: usize = DH_LEN + KEM_SEED_LEN; // 32 + 64 = 96
 
 /// Total serialized length of a hybrid public key (X25519 + ML-KEM-768).
 pub const HYBRID_PUB_LEN: usize = DH_LEN + KEM_EK_LEN; // 32 + 1184 = 1216
@@ -111,5 +114,73 @@ impl PqKeyPair {
                 kem_ek,
             },
         }
+    }
+
+    /// Create a hybrid keypair from raw secret bytes: `dh_secret(32) || kem_seed(64)`.
+    ///
+    /// Derives both public key components (X25519 and ML-KEM-768 EK) automatically.
+    pub fn from_secret_bytes(bytes: [u8; HYBRID_SECRET_LEN]) -> Self {
+        let mut dh_bytes = [0u8; DH_LEN];
+        dh_bytes.copy_from_slice(&bytes[..DH_LEN]);
+
+        let mut kem_seed = Zeroizing::new([0u8; KEM_SEED_LEN]);
+        kem_seed.copy_from_slice(&bytes[DH_LEN..]);
+
+        let dh_kp = KeyPair::from_secret(StaticSecret::from_bytes(dh_bytes));
+        let kem_ek = kem_ek_from_seed(&kem_seed);
+
+        Self {
+            secret: PqStaticSecret {
+                dh: dh_kp.secret,
+                kem_seed,
+            },
+            public: PqPublicKey {
+                dh: dh_kp.public,
+                kem_ek,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::pq::kem_generate;
+    use x25519_dalek::{PublicKey as DalekPublicKey, StaticSecret as DalekStaticSecret};
+
+    #[test]
+    fn from_secret_bytes_matches_manual_construction() {
+        // Build a keypair manually from known components.
+        let dh_bytes = [42u8; DH_LEN];
+        let dh_secret = DalekStaticSecret::from(dh_bytes);
+        let dh_public = PublicKey::from_bytes(DalekPublicKey::from(&dh_secret).to_bytes());
+
+        // Generate a KEM seed and derive its EK the same way kem_generate does.
+        let mut rng = rand_core::OsRng;
+        let (kem_seed, kem_ek) = kem_generate(&mut rng);
+
+        let manual = PqKeyPair {
+            secret: PqStaticSecret {
+                dh: StaticSecret::from_bytes(dh_bytes),
+                kem_seed: Zeroizing::new(*kem_seed),
+            },
+            public: PqPublicKey {
+                dh: dh_public,
+                kem_ek,
+            },
+        };
+
+        // Reconstruct from the concatenated secret bytes.
+        let mut secret_bytes = [0u8; HYBRID_SECRET_LEN];
+        secret_bytes[..DH_LEN].copy_from_slice(&dh_bytes);
+        secret_bytes[DH_LEN..].copy_from_slice(&*kem_seed);
+
+        let from_helper = PqKeyPair::from_secret_bytes(secret_bytes);
+
+        assert_eq!(
+            from_helper.public.dh_public().as_bytes(),
+            manual.public.dh_public().as_bytes(),
+        );
+        assert_eq!(from_helper.public.kem_ek(), manual.public.kem_ek());
     }
 }

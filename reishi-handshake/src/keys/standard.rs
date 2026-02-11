@@ -80,4 +80,32 @@ impl KeyPair {
             public: PublicKey(public.to_bytes()),
         }
     }
+
+    /// Create a keypair from raw 32-byte secret key material.
+    ///
+    /// Derives the corresponding public key automatically.
+    pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
+        Self::from_secret(StaticSecret::from_bytes(bytes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_secret_bytes_matches_manual_construction() {
+        let bytes = [42u8; 32];
+
+        let from_helper = KeyPair::from_secret_bytes(bytes);
+
+        let secret = DalekStaticSecret::from(bytes);
+        let public = DalekPublicKey::from(&secret);
+        let manual = KeyPair {
+            secret: StaticSecret(secret),
+            public: PublicKey(public.to_bytes()),
+        };
+
+        assert_eq!(from_helper.public.as_bytes(), manual.public.as_bytes());
+    }
 }

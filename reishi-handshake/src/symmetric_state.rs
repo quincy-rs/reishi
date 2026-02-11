@@ -5,9 +5,6 @@ use crate::crypto::aead::AEAD_KEY_LEN;
 use crate::crypto::hash::{self, HASH_LEN};
 use crate::error::Error;
 
-/// The Noise protocol name for our fixed ciphersuite.
-pub const PROTOCOL_NAME: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
-
 /// Noise SymmetricState — manages the chaining key and handshake hash.
 ///
 /// Per Noise spec Section 5.2.

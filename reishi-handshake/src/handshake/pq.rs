@@ -30,10 +30,10 @@ use crate::crypto::pq::{self, KEM_CT_LEN, KEM_EK_LEN, KEM_SEED_LEN};
 use crate::crypto::x25519::{self, DH_LEN};
 use crate::error::Error;
 use crate::handshake::HandshakeAction;
-use crate::pq_types::{HYBRID_PUB_LEN, PqKeyPair, PqPublicKey};
+use crate::keys::pq::{HYBRID_PUB_LEN, PqKeyPair, PqPublicKey};
+use crate::keys::{PublicKey, StaticSecret};
 use crate::symmetric_state::SymmetricState;
 use crate::transport::TransportState;
-use crate::types::StaticSecret;
 
 /// The Noise protocol name for the hybrid PQ ciphersuite.
 pub const PQ_PROTOCOL_NAME: &str = "Noise_IKpq_25519+MLKEM768_ChaChaPoly_BLAKE2s";
@@ -240,7 +240,7 @@ impl PqHandshake {
         let dh = self.rs_dh?;
         let kem_ek = self.rs_kem_ek?;
         Some(PqPublicKey {
-            dh: crate::types::PublicKey::from_bytes(dh),
+            dh: PublicKey::from_bytes(dh),
             kem_ek,
         })
     }
