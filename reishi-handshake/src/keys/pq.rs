@@ -152,9 +152,9 @@ impl PqKeyPair {
     }
 
     /// Export the raw secret bytes: `dh_secret(32) || kem_seed(64)`.
-    pub fn secret_bytes(&self) -> [u8; HYBRID_SECRET_LEN] {
-        let mut out = [0u8; HYBRID_SECRET_LEN];
-        out[..DH_LEN].copy_from_slice(&self.secret.dh.to_bytes());
+    pub fn secret_bytes(&self) -> Zeroizing<[u8; HYBRID_SECRET_LEN]> {
+        let mut out = Zeroizing::new([0u8; HYBRID_SECRET_LEN]);
+        out[..DH_LEN].copy_from_slice(&*self.secret.dh.to_bytes());
         out[DH_LEN..].copy_from_slice(&*self.secret.kem_seed);
         out
     }
@@ -226,7 +226,7 @@ mod tests {
         let kp = PqKeyPair::generate(&mut rng);
 
         let exported = kp.secret_bytes();
-        let restored = PqKeyPair::from_secret_bytes(exported);
+        let restored = PqKeyPair::from_secret_bytes(*exported);
 
         assert_eq!(
             kp.public.dh_public().as_bytes(),

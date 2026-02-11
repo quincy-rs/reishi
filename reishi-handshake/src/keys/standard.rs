@@ -1,6 +1,6 @@
 use rand_core::CryptoRngCore;
 use x25519_dalek::{PublicKey as DalekPublicKey, StaticSecret as DalekStaticSecret};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// An X25519 static secret key.
 ///
@@ -20,8 +20,8 @@ impl StaticSecret {
     }
 
     /// Export the raw 32-byte secret key material.
-    pub fn to_bytes(&self) -> [u8; 32] {
-        self.0.to_bytes()
+    pub fn to_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.0.to_bytes())
     }
 
     pub(crate) fn inner(&self) -> &DalekStaticSecret {
@@ -94,7 +94,7 @@ impl KeyPair {
     }
 
     /// Export the raw 32-byte secret key material.
-    pub fn secret_bytes(&self) -> [u8; 32] {
+    pub fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
         self.secret.to_bytes()
     }
 }
@@ -135,6 +135,6 @@ mod tests {
         let bytes = [42u8; 32];
         let kp = KeyPair::from_secret_bytes(bytes);
 
-        assert_eq!(kp.secret_bytes(), bytes);
+        assert_eq!(*kp.secret_bytes(), bytes);
     }
 }
