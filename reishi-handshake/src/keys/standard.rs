@@ -1,6 +1,6 @@
 use rand_core::CryptoRngCore;
 use x25519_dalek::{PublicKey as DalekPublicKey, StaticSecret as DalekStaticSecret};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// An X25519 static secret key.
 ///
@@ -17,6 +17,11 @@ impl StaticSecret {
     /// Wrap an existing `DalekStaticSecret`.
     pub(crate) fn from_dalek(secret: DalekStaticSecret) -> Self {
         Self(secret)
+    }
+
+    /// Export the raw 32-byte secret key material.
+    pub fn to_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.0.to_bytes())
     }
 
     pub(crate) fn inner(&self) -> &DalekStaticSecret {
@@ -87,6 +92,11 @@ impl KeyPair {
     pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
         Self::from_secret(StaticSecret::from_bytes(bytes))
     }
+
+    /// Export the raw 32-byte secret key material.
+    pub fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
+        self.secret.to_bytes()
+    }
 }
 
 #[cfg(test)]
@@ -107,5 +117,24 @@ mod tests {
         };
 
         assert_eq!(from_helper.public.as_bytes(), manual.public.as_bytes());
+    }
+
+    #[test]
+    fn from_secret_derives_correct_public_key() {
+        let bytes = [42u8; 32];
+        let secret = StaticSecret::from_bytes(bytes);
+        let expected_public = DalekPublicKey::from(&DalekStaticSecret::from(bytes)).to_bytes();
+
+        let kp = KeyPair::from_secret(secret);
+
+        assert_eq!(*kp.public.as_bytes(), expected_public);
+    }
+
+    #[test]
+    fn secret_bytes_round_trips() {
+        let bytes = [42u8; 32];
+        let kp = KeyPair::from_secret_bytes(bytes);
+
+        assert_eq!(*kp.secret_bytes(), bytes);
     }
 }
