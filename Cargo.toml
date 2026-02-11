@@ -10,7 +10,6 @@ version = "0.1.0"
 authors = ["Jakub Kubík <jakub.kubik.it@protonmail.com>"]
 edition = "2024"
 license = "MIT"
-readme = "README.md"
 rust-version = "1.85"
 homepage = "https://github.com/quincy-rs/reishi"
 repository = "https://github.com/quincy-rs/reishi"
