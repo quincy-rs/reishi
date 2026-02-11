@@ -118,4 +118,23 @@ mod tests {
 
         assert_eq!(from_helper.public.as_bytes(), manual.public.as_bytes());
     }
+
+    #[test]
+    fn from_secret_derives_correct_public_key() {
+        let bytes = [42u8; 32];
+        let secret = StaticSecret::from_bytes(bytes);
+        let expected_public = DalekPublicKey::from(&DalekStaticSecret::from(bytes)).to_bytes();
+
+        let kp = KeyPair::from_secret(secret);
+
+        assert_eq!(*kp.public.as_bytes(), expected_public);
+    }
+
+    #[test]
+    fn secret_bytes_round_trips() {
+        let bytes = [42u8; 32];
+        let kp = KeyPair::from_secret_bytes(bytes);
+
+        assert_eq!(kp.secret_bytes(), bytes);
+    }
 }

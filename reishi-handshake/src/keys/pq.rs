@@ -201,4 +201,37 @@ mod tests {
         );
         assert_eq!(from_helper.public.kem_ek(), manual.public.kem_ek());
     }
+
+    #[test]
+    fn from_secret_derives_correct_public_keys() {
+        let dh_bytes = [42u8; DH_LEN];
+        let mut rng = rand_core::OsRng;
+        let (kem_seed, kem_ek) = kem_generate(&mut rng);
+
+        let expected_dh_public =
+            DalekPublicKey::from(&DalekStaticSecret::from(dh_bytes)).to_bytes();
+
+        let kp = PqKeyPair::from_secret(PqStaticSecret {
+            dh: StaticSecret::from_bytes(dh_bytes),
+            kem_seed: Zeroizing::new(*kem_seed),
+        });
+
+        assert_eq!(*kp.public.dh_public().as_bytes(), expected_dh_public);
+        assert_eq!(*kp.public.kem_ek(), kem_ek);
+    }
+
+    #[test]
+    fn secret_bytes_round_trips() {
+        let mut rng = rand_core::OsRng;
+        let kp = PqKeyPair::generate(&mut rng);
+
+        let exported = kp.secret_bytes();
+        let restored = PqKeyPair::from_secret_bytes(exported);
+
+        assert_eq!(
+            kp.public.dh_public().as_bytes(),
+            restored.public.dh_public().as_bytes()
+        );
+        assert_eq!(kp.public.kem_ek(), restored.public.kem_ek());
+    }
 }
