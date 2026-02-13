@@ -9,9 +9,18 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 pub struct StaticSecret(DalekStaticSecret);
 
 impl StaticSecret {
+    /// The length of a static secret key in bytes.
+    pub const LEN: usize = 32;
+
     /// Create from raw 32-byte secret key material.
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(DalekStaticSecret::from(bytes))
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        let mut copy = *bytes;
+        // DalekStaticSecret::from takes [u8; 32] by value, so a by-value copy
+        // lands on its stack frame. We cannot zeroize that copy, but it lives in
+        // dead stack space once the call returns and is quickly overwritten.
+        let secret = Self(DalekStaticSecret::from(copy));
+        copy.zeroize();
+        secret
     }
 
     /// Wrap an existing `DalekStaticSecret`.
@@ -89,7 +98,7 @@ impl KeyPair {
     /// Create a keypair from raw 32-byte secret key material.
     ///
     /// Derives the corresponding public key automatically.
-    pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
+    pub fn from_secret_bytes(bytes: &[u8; 32]) -> Self {
         Self::from_secret(StaticSecret::from_bytes(bytes))
     }
 
@@ -107,7 +116,7 @@ mod tests {
     fn from_secret_bytes_matches_manual_construction() {
         let bytes = [42u8; 32];
 
-        let from_helper = KeyPair::from_secret_bytes(bytes);
+        let from_helper = KeyPair::from_secret_bytes(&bytes);
 
         let secret = DalekStaticSecret::from(bytes);
         let public = DalekPublicKey::from(&secret);
@@ -122,7 +131,7 @@ mod tests {
     #[test]
     fn from_secret_derives_correct_public_key() {
         let bytes = [42u8; 32];
-        let secret = StaticSecret::from_bytes(bytes);
+        let secret = StaticSecret::from_bytes(&bytes);
         let expected_public = DalekPublicKey::from(&DalekStaticSecret::from(bytes)).to_bytes();
 
         let kp = KeyPair::from_secret(secret);
@@ -133,7 +142,7 @@ mod tests {
     #[test]
     fn secret_bytes_round_trips() {
         let bytes = [42u8; 32];
-        let kp = KeyPair::from_secret_bytes(bytes);
+        let kp = KeyPair::from_secret_bytes(&bytes);
 
         assert_eq!(*kp.secret_bytes(), bytes);
     }

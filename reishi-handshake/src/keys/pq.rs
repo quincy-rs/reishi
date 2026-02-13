@@ -11,12 +11,6 @@ use super::standard::{KeyPair, PublicKey, StaticSecret};
 use crate::crypto::pq::{KEM_EK_LEN, KEM_SEED_LEN, kem_ek_from_seed, kem_generate};
 use crate::crypto::x25519::DH_LEN;
 
-/// Total length of a hybrid secret key in bytes (X25519 + ML-KEM-768 seed).
-pub const HYBRID_SECRET_LEN: usize = DH_LEN + KEM_SEED_LEN; // 32 + 64 = 96
-
-/// Total serialized length of a hybrid public key (X25519 + ML-KEM-768).
-pub const HYBRID_PUB_LEN: usize = DH_LEN + KEM_EK_LEN; // 32 + 1184 = 1216
-
 /// A hybrid static secret bundling X25519 + ML-KEM-768 keys.
 ///
 /// Both components are zeroized on drop.
@@ -25,6 +19,11 @@ pub struct PqStaticSecret {
     pub(crate) dh: StaticSecret,
     /// ML-KEM-768 decapsulation key seed (64 bytes).
     pub(crate) kem_seed: Zeroizing<[u8; KEM_SEED_LEN]>,
+}
+
+impl PqStaticSecret {
+    /// Total length of a hybrid secret key in bytes (X25519 + ML-KEM-768 seed).
+    pub const LEN: usize = DH_LEN + KEM_SEED_LEN; // 32 + 64 = 96
 }
 
 /// A hybrid public key bundling X25519 + ML-KEM-768 encapsulation key.
@@ -38,7 +37,7 @@ pub struct PqPublicKey {
 
 impl PqPublicKey {
     /// Total serialized length: 1216 bytes.
-    pub const LEN: usize = HYBRID_PUB_LEN;
+    pub const LEN: usize = DH_LEN + KEM_EK_LEN;
 
     /// Access the X25519 public key component.
     pub fn dh_public(&self) -> &PublicKey {
@@ -52,7 +51,7 @@ impl PqPublicKey {
 
     /// Serialize to bytes: `dh_pub(32) || kem_ek(1184)`.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(HYBRID_PUB_LEN);
+        let mut out = Vec::with_capacity(PqPublicKey::LEN);
         out.extend_from_slice(self.dh.as_bytes());
         out.extend_from_slice(&self.kem_ek);
         out
@@ -60,9 +59,9 @@ impl PqPublicKey {
 
     /// Deserialize from a byte slice.
     ///
-    /// Returns `None` if the slice is not exactly `HYBRID_PUB_LEN` bytes.
+    /// Returns `None` if the slice is not exactly `PqPublicKey::LEN` bytes.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != HYBRID_PUB_LEN {
+        if bytes.len() != PqPublicKey::LEN {
             return None;
         }
         let mut dh_bytes = [0u8; DH_LEN];
@@ -138,22 +137,22 @@ impl PqKeyPair {
     /// Create a hybrid keypair from raw secret bytes: `dh_secret(32) || kem_seed(64)`.
     ///
     /// Derives both public key components (X25519 and ML-KEM-768 EK) automatically.
-    pub fn from_secret_bytes(bytes: [u8; HYBRID_SECRET_LEN]) -> Self {
-        let mut dh_bytes = [0u8; DH_LEN];
+    pub fn from_secret_bytes(bytes: &[u8; PqStaticSecret::LEN]) -> Self {
+        let mut dh_bytes = Zeroizing::new([0u8; DH_LEN]);
         dh_bytes.copy_from_slice(&bytes[..DH_LEN]);
 
         let mut kem_seed = Zeroizing::new([0u8; KEM_SEED_LEN]);
         kem_seed.copy_from_slice(&bytes[DH_LEN..]);
 
         Self::from_secret(PqStaticSecret {
-            dh: StaticSecret::from_bytes(dh_bytes),
+            dh: StaticSecret::from_bytes(&dh_bytes),
             kem_seed,
         })
     }
 
     /// Export the raw secret bytes: `dh_secret(32) || kem_seed(64)`.
-    pub fn secret_bytes(&self) -> Zeroizing<[u8; HYBRID_SECRET_LEN]> {
-        let mut out = Zeroizing::new([0u8; HYBRID_SECRET_LEN]);
+    pub fn secret_bytes(&self) -> Zeroizing<[u8; PqStaticSecret::LEN]> {
+        let mut out = Zeroizing::new([0u8; PqStaticSecret::LEN]);
         out[..DH_LEN].copy_from_slice(&*self.secret.dh.to_bytes());
         out[DH_LEN..].copy_from_slice(&*self.secret.kem_seed);
         out
@@ -179,7 +178,7 @@ mod tests {
 
         let manual = PqKeyPair {
             secret: PqStaticSecret {
-                dh: StaticSecret::from_bytes(dh_bytes),
+                dh: StaticSecret::from_bytes(&dh_bytes),
                 kem_seed: Zeroizing::new(*kem_seed),
             },
             public: PqPublicKey {
@@ -189,11 +188,11 @@ mod tests {
         };
 
         // Reconstruct from the concatenated secret bytes.
-        let mut secret_bytes = [0u8; HYBRID_SECRET_LEN];
+        let mut secret_bytes = [0u8; PqStaticSecret::LEN];
         secret_bytes[..DH_LEN].copy_from_slice(&dh_bytes);
         secret_bytes[DH_LEN..].copy_from_slice(&*kem_seed);
 
-        let from_helper = PqKeyPair::from_secret_bytes(secret_bytes);
+        let from_helper = PqKeyPair::from_secret_bytes(&secret_bytes);
 
         assert_eq!(
             from_helper.public.dh_public().as_bytes(),
@@ -212,7 +211,7 @@ mod tests {
             DalekPublicKey::from(&DalekStaticSecret::from(dh_bytes)).to_bytes();
 
         let kp = PqKeyPair::from_secret(PqStaticSecret {
-            dh: StaticSecret::from_bytes(dh_bytes),
+            dh: StaticSecret::from_bytes(&dh_bytes),
             kem_seed: Zeroizing::new(*kem_seed),
         });
 
@@ -226,7 +225,7 @@ mod tests {
         let kp = PqKeyPair::generate(&mut rng);
 
         let exported = kp.secret_bytes();
-        let restored = PqKeyPair::from_secret_bytes(*exported);
+        let restored = PqKeyPair::from_secret_bytes(&exported);
 
         assert_eq!(
             kp.public.dh_public().as_bytes(),
