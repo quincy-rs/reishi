@@ -6,7 +6,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Jakub Kubík <jakub.kubik.it@protonmail.com>"]
 edition = "2024"
 license = "MIT"
@@ -18,7 +18,7 @@ categories = ["cryptography", "network-programming"]
 
 [workspace.dependencies]
 # Internal crates
-reishi-handshake = { path = "reishi-handshake", version = "0.1.1" }
+reishi-handshake = { path = "reishi-handshake", version = "0.1.2" }
 
 # Cryptography
 blake2 = { version = "0.10", default-features = false }
