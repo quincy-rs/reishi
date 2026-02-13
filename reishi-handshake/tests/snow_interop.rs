@@ -23,7 +23,7 @@ fn random_private_key() -> [u8; 32] {
 
 /// Build a reishi `KeyPair` from raw 32-byte private key bytes.
 fn reishi_keypair_from_bytes(private: &[u8; 32]) -> KeyPair {
-    KeyPair::from_secret(StaticSecret::from_bytes(*private))
+    KeyPair::from_secret(StaticSecret::from_bytes(private))
 }
 
 /// Derive the public key from a private key using x25519-dalek directly.

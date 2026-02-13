@@ -31,4 +31,4 @@ pub use transport::TransportState;
 #[cfg(feature = "pq")]
 pub use handshake::{PQ_PROTOCOL_NAME, PqHandshake};
 #[cfg(feature = "pq")]
-pub use keys::{HYBRID_SECRET_LEN, PqKeyPair, PqPublicKey, PqStaticSecret};
+pub use keys::{PqKeyPair, PqPublicKey, PqStaticSecret};

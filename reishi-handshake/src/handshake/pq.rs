@@ -30,7 +30,7 @@ use crate::crypto::pq::{self, KEM_CT_LEN, KEM_EK_LEN, KEM_SEED_LEN};
 use crate::crypto::x25519::{self, DH_LEN};
 use crate::error::Error;
 use crate::handshake::HandshakeAction;
-use crate::keys::pq::{HYBRID_PUB_LEN, PqKeyPair, PqPublicKey};
+use crate::keys::pq::{PqKeyPair, PqPublicKey};
 use crate::keys::{PublicKey, StaticSecret};
 use crate::symmetric_state::SymmetricState;
 use crate::transport::TransportState;
@@ -43,7 +43,7 @@ pub const PQ_PROTOCOL_NAME: &str = "Noise_IKpq_25519+MLKEM768_ChaChaPoly_BLAKE2s
 const MSG1_OVERHEAD: usize = DH_LEN                          // 32
     + KEM_EK_LEN                                              // 1184
     + KEM_CT_LEN                                              // 1088
-    + HYBRID_PUB_LEN + AEAD_TAG_LEN                          // 1232
+    + PqPublicKey::LEN + AEAD_TAG_LEN                          // 1232
     + KEM_CT_LEN                                              // 1088
     + AEAD_TAG_LEN; // 16
 // Total: 4640
@@ -339,7 +339,7 @@ impl PqHandshake {
         offset += KEM_CT_LEN;
 
         // -> s: encrypt_and_hash(s_dh_pub || s_kem_ek)
-        let mut s_hybrid = [0u8; HYBRID_PUB_LEN];
+        let mut s_hybrid = [0u8; PqPublicKey::LEN];
         s_hybrid[..DH_LEN].copy_from_slice(&self.s_dh_pub);
         s_hybrid[DH_LEN..].copy_from_slice(&self.s_kem_ek);
         let s_len = self.ss()?.encrypt_and_hash(&s_hybrid, &mut out[offset..])?;
@@ -399,12 +399,12 @@ impl PqHandshake {
         offset += KEM_CT_LEN;
 
         // -> s: decrypt_and_hash → recover s_dh_pub || s_kem_ek
-        let encrypted_s_len = HYBRID_PUB_LEN + AEAD_TAG_LEN;
-        let mut s_hybrid = [0u8; HYBRID_PUB_LEN];
+        let encrypted_s_len = PqPublicKey::LEN + AEAD_TAG_LEN;
+        let mut s_hybrid = [0u8; PqPublicKey::LEN];
         let s_len = self
             .ss()?
             .decrypt_and_hash(&message[offset..offset + encrypted_s_len], &mut s_hybrid)?;
-        if s_len != HYBRID_PUB_LEN {
+        if s_len != PqPublicKey::LEN {
             s_hybrid.zeroize();
             return Err(Error::BadMessage);
         }
