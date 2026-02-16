@@ -5,6 +5,7 @@
 //! stream and deriving QUIC encryption keys from the handshake output.
 
 use std::any::Any;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use quinn_proto::transport_parameters::TransportParameters;
@@ -14,7 +15,7 @@ use reishi_handshake::crypto::aead::AEAD_TAG_LEN;
 use reishi_handshake::crypto::hash::{HASH_LEN, hkdf_expand, hkdf2, hkdf3, hmac};
 use zeroize::Zeroize;
 
-use crate::active_handshake::ActiveHandshake;
+use crate::active_handshake::{ActiveHandshake, RemoteIdentity};
 use crate::framing::HandshakeMessageFramer;
 use crate::initial::{initial_level_secret, retry_tag_key};
 use crate::keys::{keys_from_level_secret, packet_keys_from_level_secret};
@@ -108,6 +109,11 @@ pub struct NoiseSession {
     peer_params: Option<TransportParameters>,
     /// Set to `true` once we have data for `handshake_data()`.
     handshake_data_ready: bool,
+    /// Optional whitelist of allowed client public keys (server-side only).
+    allowed_keys: Option<Arc<HashSet<reishi_handshake::PublicKey>>>,
+    /// Optional whitelist of allowed client PQ public keys (server-side only, PQ mode).
+    #[cfg(feature = "pq")]
+    allowed_pq_keys: Option<Arc<HashSet<reishi_handshake::PqPublicKey>>>,
 }
 
 impl NoiseSession {
@@ -121,6 +127,9 @@ impl NoiseSession {
             local_params: None,
             peer_params: None,
             handshake_data_ready: false,
+            allowed_keys: None,
+            #[cfg(feature = "pq")]
+            allowed_pq_keys: None,
         }
     }
 
@@ -146,6 +155,9 @@ impl NoiseSession {
             local_params: Some(params),
             peer_params: None,
             handshake_data_ready: false,
+            allowed_keys: None,
+            #[cfg(feature = "pq")]
+            allowed_pq_keys: None,
         }
     }
 
@@ -167,6 +179,9 @@ impl NoiseSession {
             local_params: Some(params),
             peer_params: None,
             handshake_data_ready: false,
+            allowed_keys: config.allowed_keys.clone(),
+            #[cfg(feature = "pq")]
+            allowed_pq_keys: None,
         }
     }
 
@@ -195,6 +210,8 @@ impl NoiseSession {
             local_params: Some(params),
             peer_params: None,
             handshake_data_ready: false,
+            allowed_keys: None,
+            allowed_pq_keys: None,
         }
     }
 
@@ -219,6 +236,8 @@ impl NoiseSession {
             local_params: Some(params),
             peer_params: None,
             handshake_data_ready: false,
+            allowed_keys: None,
+            allowed_pq_keys: config.allowed_keys.clone(),
         }
     }
 
@@ -250,6 +269,31 @@ impl NoiseSession {
             let payload_len = handshake
                 .read_message(&message, &mut payload_buf)
                 .map_err(|_| Self::crypto_error())?;
+
+            // Server-side whitelist check: reject unknown clients immediately
+            // after decrypting Message 1, before sending Message 2.
+            if !self.is_initiator {
+                let remote = handshake.remote_identity().ok_or_else(Self::crypto_error)?;
+                match remote {
+                    RemoteIdentity::Standard(key) => {
+                        if let Some(ref allowed) = self.allowed_keys {
+                            if !allowed.contains(&key) {
+                                self.state = HandshakeState::Failed;
+                                return Err(Self::crypto_error());
+                            }
+                        }
+                    }
+                    #[cfg(feature = "pq")]
+                    RemoteIdentity::Pq(key) => {
+                        if let Some(ref allowed) = self.allowed_pq_keys {
+                            if !allowed.contains(&*key) {
+                                self.state = HandshakeState::Failed;
+                                return Err(Self::crypto_error());
+                            }
+                        }
+                    }
+                }
+            }
 
             if self.peer_params.is_none() && payload_len > 0 {
                 // TransportParameters::read(side) takes the LOCAL side (the

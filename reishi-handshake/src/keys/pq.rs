@@ -4,7 +4,10 @@
 //! (post-quantum) component. This enables the hybrid IK pattern where
 //! compromise of either primitive alone does not break the handshake.
 
+use core::hash::{Hash, Hasher};
+
 use rand_core::CryptoRngCore;
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::standard::{KeyPair, PublicKey, StaticSecret};
@@ -72,6 +75,23 @@ impl PqPublicKey {
             dh: PublicKey::from_bytes(dh_bytes),
             kem_ek,
         })
+    }
+}
+
+impl PartialEq for PqPublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        let dh_eq = self.dh.as_bytes().ct_eq(other.dh.as_bytes());
+        let kem_eq = self.kem_ek.ct_eq(&other.kem_ek);
+        (dh_eq & kem_eq).into()
+    }
+}
+
+impl Eq for PqPublicKey {}
+
+impl Hash for PqPublicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.dh.as_bytes().hash(state);
+        self.kem_ek.hash(state);
     }
 }
 

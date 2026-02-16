@@ -5,6 +5,7 @@
 //! These are the PQ counterparts of `NoiseConfigBuilder`, `NoiseClientConfig`,
 //! and `NoiseServerConfig`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use quinn_proto::transport_parameters::TransportParameters;
@@ -21,6 +22,7 @@ pub(crate) struct PqNoiseConfig {
     pub(crate) local_keypair: PqKeyPair,
     pub(crate) remote_public: Option<PqPublicKey>,
     pub(crate) prologue: Option<Vec<u8>>,
+    pub(crate) allowed_keys: Option<Arc<HashSet<PqPublicKey>>>,
 }
 
 /// PQ Noise IK client (initiator) configuration.
@@ -100,6 +102,7 @@ pub struct PqNoiseConfigBuilder {
     local_keypair: PqKeyPair,
     remote_public: Option<PqPublicKey>,
     prologue: Option<Vec<u8>>,
+    allowed_keys: Option<HashSet<PqPublicKey>>,
 }
 
 impl PqNoiseConfigBuilder {
@@ -109,6 +112,7 @@ impl PqNoiseConfigBuilder {
             local_keypair,
             remote_public: None,
             prologue: None,
+            allowed_keys: None,
         }
     }
 
@@ -130,11 +134,26 @@ impl PqNoiseConfigBuilder {
         self
     }
 
+    /// Set the allowed client PQ public keys (server-side whitelist).
+    ///
+    /// When set, only clients whose full hybrid public key (X25519 + ML-KEM-768)
+    /// is in this set will be allowed to complete the handshake. The check
+    /// happens immediately after the server decrypts Message 1, before
+    /// sending Message 2.
+    ///
+    /// Has no effect on client (initiator) configurations.
+    pub fn with_allowed_keys(mut self, keys: impl IntoIterator<Item = PqPublicKey>) -> Self {
+        self.allowed_keys = Some(keys.into_iter().collect());
+        self
+    }
+
+    /// Build the shared inner config.
     fn build_inner(self) -> PqNoiseConfig {
         PqNoiseConfig {
             local_keypair: self.local_keypair,
             remote_public: self.remote_public,
             prologue: self.prologue,
+            allowed_keys: self.allowed_keys.map(Arc::new),
         }
     }
 

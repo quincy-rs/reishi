@@ -54,6 +54,7 @@ pub use reishi_handshake::{PQ_PROTOCOL_NAME, PqKeyPair, PqPublicKey, PqStaticSec
 #[cfg(feature = "pq")]
 pub use pq_config::{PqNoiseClientConfig, PqNoiseConfigBuilder, PqNoiseServerConfig};
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::initial::compute_retry_tag;
@@ -115,6 +116,7 @@ pub(crate) struct NoiseConfig {
     pub(crate) local_keypair: KeyPair,
     pub(crate) remote_public: Option<PublicKey>,
     pub(crate) prologue: Option<Vec<u8>>,
+    pub(crate) allowed_keys: Option<Arc<HashSet<PublicKey>>>,
 }
 
 /// Noise IK client (initiator) configuration.
@@ -210,6 +212,7 @@ pub struct NoiseConfigBuilder {
     local_keypair: KeyPair,
     remote_public: Option<PublicKey>,
     prologue: Option<Vec<u8>>,
+    allowed_keys: Option<HashSet<PublicKey>>,
 }
 
 impl NoiseConfigBuilder {
@@ -219,6 +222,7 @@ impl NoiseConfigBuilder {
             local_keypair,
             remote_public: None,
             prologue: None,
+            allowed_keys: None,
         }
     }
 
@@ -240,12 +244,25 @@ impl NoiseConfigBuilder {
         self
     }
 
+    /// Set the allowed client public keys (server-side whitelist).
+    ///
+    /// When set, only clients whose X25519 static key is in this set will
+    /// be allowed to complete the handshake. The check happens immediately
+    /// after the server decrypts Message 1, before sending Message 2.
+    ///
+    /// Has no effect on client (initiator) configurations.
+    pub fn with_allowed_keys(mut self, keys: impl IntoIterator<Item = PublicKey>) -> Self {
+        self.allowed_keys = Some(keys.into_iter().collect());
+        self
+    }
+
     /// Build the shared inner config.
     fn build_inner(self) -> NoiseConfig {
         NoiseConfig {
             local_keypair: self.local_keypair,
             remote_public: self.remote_public,
             prologue: self.prologue,
+            allowed_keys: self.allowed_keys.map(Arc::new),
         }
     }
 

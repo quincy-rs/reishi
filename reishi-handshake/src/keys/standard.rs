@@ -1,4 +1,7 @@
+use core::hash::{Hash, Hasher};
+
 use rand_core::CryptoRngCore;
+use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey as DalekPublicKey, StaticSecret as DalekStaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -39,7 +42,7 @@ impl StaticSecret {
 }
 
 /// An X25519 public key (32 bytes).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub struct PublicKey([u8; 32]);
 
 impl PublicKey {
@@ -54,6 +57,20 @@ impl PublicKey {
     /// Access the raw bytes of this public key.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+}
+
+impl PartialEq for PublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ct_eq(&other.0).into()
+    }
+}
+
+impl Eq for PublicKey {}
+
+impl Hash for PublicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
     }
 }
 

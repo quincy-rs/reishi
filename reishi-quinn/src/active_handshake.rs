@@ -5,10 +5,20 @@
 //! a single uniform interface used by `NoiseSession`.
 
 use reishi_handshake::crypto::hash::HASH_LEN;
-use reishi_handshake::{Error, Handshake, HandshakeAction};
+use reishi_handshake::{Error, Handshake, HandshakeAction, PublicKey};
 
 #[cfg(feature = "pq")]
 use reishi_handshake::{PqHandshake, PqPublicKey};
+
+/// The remote peer's static identity, typed by handshake mode.
+///
+/// Used for whitelist checks where the identity type depends on whether
+/// the session is running a standard or PQ handshake.
+pub(crate) enum RemoteIdentity {
+    Standard(PublicKey),
+    #[cfg(feature = "pq")]
+    Pq(Box<PqPublicKey>),
+}
 
 /// Wraps either a standard or PQ handshake, delegating all calls.
 ///
@@ -68,6 +78,20 @@ impl ActiveHandshake {
             Self::Standard(h) => h.handshake_hash(),
             #[cfg(feature = "pq")]
             Self::Pq(h) => h.handshake_hash(),
+        }
+    }
+
+    /// The remote peer's static identity, typed by handshake mode.
+    ///
+    /// Returns `Standard(PublicKey)` for a standard IK handshake, or
+    /// `Pq(PqPublicKey)` for a hybrid PQ handshake.
+    pub fn remote_identity(&self) -> Option<RemoteIdentity> {
+        match self {
+            Self::Standard(h) => h
+                .remote_public_bytes()
+                .map(|b| RemoteIdentity::Standard(PublicKey::from_bytes(b))),
+            #[cfg(feature = "pq")]
+            Self::Pq(h) => h.remote_public().map(|k| RemoteIdentity::Pq(Box::new(k))),
         }
     }
 

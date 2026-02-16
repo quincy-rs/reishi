@@ -41,6 +41,18 @@ fn make_server_config(kp: KeyPair) -> ServerConfig {
     ServerConfig::new(Arc::new(noise), noise_handshake_token_key())
 }
 
+/// Generate a server config with an allowed-keys whitelist.
+fn make_server_config_with_allowed_keys(
+    kp: KeyPair,
+    allowed: impl IntoIterator<Item = reishi_quinn::PublicKey>,
+) -> ServerConfig {
+    let noise = NoiseConfigBuilder::new(kp)
+        .with_allowed_keys(allowed)
+        .build_server_config()
+        .unwrap();
+    ServerConfig::new(Arc::new(noise), noise_handshake_token_key())
+}
+
 /// Generate a client config from a keypair and the server's public key.
 fn make_client_config(kp: KeyPair, server_public: reishi_quinn::PublicKey) -> ClientConfig {
     let noise = NoiseConfigBuilder::new(kp)
@@ -304,4 +316,125 @@ async fn export_keying_material() {
 
     client_conn.close(0u32.into(), b"done");
     server_conn.close(0u32.into(), b"done");
+}
+
+// =========================================================================
+// Whitelisted client accepted
+// =========================================================================
+
+#[tokio::test]
+async fn whitelisted_client_accepted() {
+    let server_kp = KeyPair::generate(&mut OsRng);
+    let server_public = server_kp.public;
+    let client_kp = KeyPair::generate(&mut OsRng);
+    let client_public = client_kp.public;
+
+    let server = server_endpoint(make_server_config_with_allowed_keys(
+        server_kp,
+        [client_public],
+    ));
+    let server_addr = server.local_addr().unwrap();
+    let client = client_endpoint();
+
+    let client_config = make_client_config(client_kp, server_public);
+    let connecting = client
+        .connect_with(client_config, server_addr, "server")
+        .unwrap();
+
+    let (client_conn, server_conn) = tokio::join!(async { connecting.await.unwrap() }, async {
+        server.accept().await.unwrap().await.unwrap()
+    },);
+
+    // Verify data transfer works
+    let (mut c_send, _) = client_conn.open_bi().await.unwrap();
+    c_send.write_all(b"whitelisted").await.unwrap();
+    c_send.finish().unwrap();
+
+    let (_, mut s_recv) = server_conn.accept_bi().await.unwrap();
+    let data = s_recv.read_to_end(4096).await.unwrap();
+    assert_eq!(data, b"whitelisted");
+
+    client_conn.close(0u32.into(), b"done");
+    server_conn.close(0u32.into(), b"done");
+}
+
+// =========================================================================
+// Non-whitelisted client rejected
+// =========================================================================
+
+#[tokio::test]
+async fn non_whitelisted_client_rejected() {
+    let server_kp = KeyPair::generate(&mut OsRng);
+    let server_public = server_kp.public;
+    let client_kp = KeyPair::generate(&mut OsRng);
+    let other_kp = KeyPair::generate(&mut OsRng);
+
+    // Whitelist only other_kp, not the actual client
+    let server = server_endpoint(make_server_config_with_allowed_keys(
+        server_kp,
+        [other_kp.public],
+    ));
+    let server_addr = server.local_addr().unwrap();
+    let client = client_endpoint();
+
+    let client_config = make_client_config(client_kp, server_public);
+    let connecting = client
+        .connect_with(client_config, server_addr, "server")
+        .unwrap();
+
+    let server_task = tokio::spawn(async move {
+        if let Some(incoming) = server.accept().await {
+            let _ = incoming.await;
+        }
+    });
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), connecting).await;
+
+    match result {
+        Ok(Ok(_)) => panic!("connection should have failed for non-whitelisted client"),
+        Ok(Err(_)) => {} // expected: handshake rejected
+        Err(_) => panic!("timed out waiting for handshake failure"),
+    }
+
+    server_task.abort();
+}
+
+// =========================================================================
+// Empty whitelist rejects all clients
+// =========================================================================
+
+#[tokio::test]
+async fn empty_whitelist_rejects_all() {
+    let server_kp = KeyPair::generate(&mut OsRng);
+    let server_public = server_kp.public;
+    let client_kp = KeyPair::generate(&mut OsRng);
+
+    // Empty whitelist: no clients allowed
+    let server = server_endpoint(make_server_config_with_allowed_keys(
+        server_kp,
+        std::iter::empty(),
+    ));
+    let server_addr = server.local_addr().unwrap();
+    let client = client_endpoint();
+
+    let client_config = make_client_config(client_kp, server_public);
+    let connecting = client
+        .connect_with(client_config, server_addr, "server")
+        .unwrap();
+
+    let server_task = tokio::spawn(async move {
+        if let Some(incoming) = server.accept().await {
+            let _ = incoming.await;
+        }
+    });
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), connecting).await;
+
+    match result {
+        Ok(Ok(_)) => panic!("connection should have failed with empty whitelist"),
+        Ok(Err(_)) => {} // expected: handshake rejected
+        Err(_) => panic!("timed out waiting for handshake failure"),
+    }
+
+    server_task.abort();
 }

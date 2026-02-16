@@ -43,6 +43,18 @@ fn make_pq_server_config(kp: PqKeyPair) -> ServerConfig {
     ServerConfig::new(Arc::new(noise), noise_handshake_token_key())
 }
 
+/// Generate a PQ server config with an allowed-keys whitelist.
+fn make_pq_server_config_with_allowed_keys(
+    kp: PqKeyPair,
+    allowed: impl IntoIterator<Item = reishi_quinn::PqPublicKey>,
+) -> ServerConfig {
+    let noise = PqNoiseConfigBuilder::new(kp)
+        .with_allowed_keys(allowed)
+        .build_server_config()
+        .unwrap();
+    ServerConfig::new(Arc::new(noise), noise_handshake_token_key())
+}
+
 /// Generate a PQ client config from a keypair and the server's PQ public key.
 fn make_pq_client_config(kp: PqKeyPair, server_public: reishi_quinn::PqPublicKey) -> ClientConfig {
     let noise = PqNoiseConfigBuilder::new(kp)
@@ -380,6 +392,127 @@ async fn pq_prologue_mismatch_rejected() {
         Ok(Ok(_)) => panic!("connection should have failed with mismatched prologue"),
         Ok(Err(_)) => {} // expected
         Err(_) => panic!("timed out waiting for handshake failure"),
+    }
+
+    server_task.abort();
+}
+
+// =========================================================================
+// PQ whitelisted client accepted
+// =========================================================================
+
+#[tokio::test]
+async fn pq_whitelisted_client_accepted() {
+    let server_kp = PqKeyPair::generate(&mut OsRng);
+    let server_public = server_kp.public.clone();
+    let client_kp = PqKeyPair::generate(&mut OsRng);
+    let client_public = client_kp.public.clone();
+
+    let server = pq_server_endpoint(make_pq_server_config_with_allowed_keys(
+        server_kp,
+        [client_public],
+    ));
+    let server_addr = server.local_addr().unwrap();
+    let client = pq_client_endpoint();
+
+    let client_config = make_pq_client_config(client_kp, server_public);
+    let connecting = client
+        .connect_with(client_config, server_addr, "server")
+        .unwrap();
+
+    let (client_conn, server_conn) = tokio::join!(async { connecting.await.unwrap() }, async {
+        server.accept().await.unwrap().await.unwrap()
+    },);
+
+    // Verify data transfer works
+    let (mut c_send, _) = client_conn.open_bi().await.unwrap();
+    c_send.write_all(b"pq whitelisted").await.unwrap();
+    c_send.finish().unwrap();
+
+    let (_, mut s_recv) = server_conn.accept_bi().await.unwrap();
+    let data = s_recv.read_to_end(4096).await.unwrap();
+    assert_eq!(data, b"pq whitelisted");
+
+    client_conn.close(0u32.into(), b"done");
+    server_conn.close(0u32.into(), b"done");
+}
+
+// =========================================================================
+// PQ non-whitelisted client rejected
+// =========================================================================
+
+#[tokio::test]
+async fn pq_non_whitelisted_client_rejected() {
+    let server_kp = PqKeyPair::generate(&mut OsRng);
+    let server_public = server_kp.public.clone();
+    let client_kp = PqKeyPair::generate(&mut OsRng);
+    let other_kp = PqKeyPair::generate(&mut OsRng);
+
+    // Whitelist only other_kp, not the actual client
+    let server = pq_server_endpoint(make_pq_server_config_with_allowed_keys(
+        server_kp,
+        [other_kp.public],
+    ));
+    let server_addr = server.local_addr().unwrap();
+    let client = pq_client_endpoint();
+
+    let client_config = make_pq_client_config(client_kp, server_public);
+    let connecting = client
+        .connect_with(client_config, server_addr, "server")
+        .unwrap();
+
+    let server_task = tokio::spawn(async move {
+        if let Some(incoming) = server.accept().await {
+            let _ = incoming.await;
+        }
+    });
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), connecting).await;
+
+    match result {
+        Ok(Ok(_)) => panic!("connection should have failed for non-whitelisted PQ client"),
+        Ok(Err(_)) => {} // expected: handshake rejected
+        Err(_) => panic!("timed out waiting for PQ handshake failure"),
+    }
+
+    server_task.abort();
+}
+
+// =========================================================================
+// PQ empty whitelist rejects all clients
+// =========================================================================
+
+#[tokio::test]
+async fn pq_empty_whitelist_rejects_all() {
+    let server_kp = PqKeyPair::generate(&mut OsRng);
+    let server_public = server_kp.public.clone();
+    let client_kp = PqKeyPair::generate(&mut OsRng);
+
+    // Empty whitelist: no clients allowed
+    let server = pq_server_endpoint(make_pq_server_config_with_allowed_keys(
+        server_kp,
+        std::iter::empty(),
+    ));
+    let server_addr = server.local_addr().unwrap();
+    let client = pq_client_endpoint();
+
+    let client_config = make_pq_client_config(client_kp, server_public);
+    let connecting = client
+        .connect_with(client_config, server_addr, "server")
+        .unwrap();
+
+    let server_task = tokio::spawn(async move {
+        if let Some(incoming) = server.accept().await {
+            let _ = incoming.await;
+        }
+    });
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), connecting).await;
+
+    match result {
+        Ok(Ok(_)) => panic!("connection should have failed with empty PQ whitelist"),
+        Ok(Err(_)) => {} // expected: handshake rejected
+        Err(_) => panic!("timed out waiting for PQ handshake failure"),
     }
 
     server_task.abort();
