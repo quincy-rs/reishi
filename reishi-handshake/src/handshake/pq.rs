@@ -30,7 +30,7 @@ use crate::crypto::pq::{self, KEM_CT_LEN, KEM_EK_LEN, KEM_SEED_LEN};
 use crate::crypto::x25519::{self, DH_LEN};
 use crate::error::Error;
 use crate::handshake::HandshakeAction;
-use crate::keys::pq::{PqKeyPair, PqPublicKey};
+use crate::keys::pq::{EncapsulationKey, PqKeyPair, PqPublicKey};
 use crate::keys::{PublicKey, StaticSecret};
 use crate::symmetric_state::SymmetricState;
 use crate::transport::TransportState;
@@ -135,7 +135,7 @@ impl PqHandshake {
 
         // IK pre-message: <- s_dh, s_kem
         symmetric.mix_hash(remote_public.dh.as_bytes());
-        symmetric.mix_hash(&remote_public.kem_ek);
+        symmetric.mix_hash(remote_public.kem_ek.as_bytes());
 
         Ok(Self {
             symmetric: Some(symmetric),
@@ -148,8 +148,8 @@ impl PqHandshake {
             e_dh_pub: None,
             re_dh: None,
             s_kem_seed: local.secret.kem_seed.clone(),
-            s_kem_ek: local.public.kem_ek,
-            rs_kem_ek: Some(remote_public.kem_ek),
+            s_kem_ek: *local.public.kem_ek.as_bytes(),
+            rs_kem_ek: Some(*remote_public.kem_ek.as_bytes()),
             e_kem_seed: None,
             e_kem_ek: None,
             re_kem_ek: None,
@@ -164,7 +164,7 @@ impl PqHandshake {
 
         // IK pre-message: <- s_dh, s_kem (our own keys)
         symmetric.mix_hash(local.public.dh.as_bytes());
-        symmetric.mix_hash(&local.public.kem_ek);
+        symmetric.mix_hash(local.public.kem_ek.as_bytes());
 
         Ok(Self {
             symmetric: Some(symmetric),
@@ -177,7 +177,7 @@ impl PqHandshake {
             e_dh_pub: None,
             re_dh: None,
             s_kem_seed: local.secret.kem_seed.clone(),
-            s_kem_ek: local.public.kem_ek,
+            s_kem_ek: *local.public.kem_ek.as_bytes(),
             rs_kem_ek: None,
             e_kem_seed: None,
             e_kem_ek: None,
@@ -241,7 +241,7 @@ impl PqHandshake {
         let kem_ek = self.rs_kem_ek?;
         Some(PqPublicKey {
             dh: PublicKey::from_bytes(dh),
-            kem_ek,
+            kem_ek: EncapsulationKey::from_bytes(kem_ek),
         })
     }
 
