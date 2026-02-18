@@ -654,16 +654,12 @@ fn pq_public_key_serialization() {
     let bytes = kp.public.to_bytes();
     assert_eq!(bytes.len(), 1216);
 
-    let recovered = reishi_handshake::PqPublicKey::from_bytes(&bytes).unwrap();
+    let recovered = reishi_handshake::PqPublicKey::from_bytes(bytes);
     assert_eq!(
         recovered.dh_public().as_bytes(),
         kp.public.dh_public().as_bytes()
     );
     assert_eq!(recovered.kem_ek(), kp.public.kem_ek());
-
-    // Wrong length should fail
-    assert!(reishi_handshake::PqPublicKey::from_bytes(&bytes[..1215]).is_none());
-    assert!(reishi_handshake::PqPublicKey::from_bytes(&[]).is_none());
 }
 
 // ===========================================================================

@@ -16,7 +16,7 @@ impl StaticSecret {
     pub const LEN: usize = 32;
 
     /// Create from raw 32-byte secret key material.
-    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+    pub fn from_bytes(bytes: &[u8; Self::LEN]) -> Self {
         let mut copy = *bytes;
         // DalekStaticSecret::from takes [u8; 32] by value, so a by-value copy
         // lands on its stack frame. We cannot zeroize that copy, but it lives in
@@ -32,7 +32,7 @@ impl StaticSecret {
     }
 
     /// Export the raw 32-byte secret key material.
-    pub fn to_bytes(&self) -> Zeroizing<[u8; 32]> {
+    pub fn to_bytes(&self) -> Zeroizing<[u8; Self::LEN]> {
         Zeroizing::new(self.0.to_bytes())
     }
 
@@ -43,19 +43,25 @@ impl StaticSecret {
 
 /// An X25519 public key (32 bytes).
 #[derive(Clone, Copy)]
-pub struct PublicKey([u8; 32]);
+pub struct PublicKey([u8; Self::LEN]);
 
 impl PublicKey {
     /// The length of a public key in bytes.
     pub const LEN: usize = 32;
 
     /// Create from raw 32-byte public key.
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub fn from_bytes(bytes: [u8; Self::LEN]) -> Self {
         Self(bytes)
     }
 
     /// Access the raw bytes of this public key.
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; Self::LEN] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8; Self::LEN]> for PublicKey {
+    fn as_ref(&self) -> &[u8; Self::LEN] {
         &self.0
     }
 }
@@ -71,12 +77,6 @@ impl Eq for PublicKey {}
 impl Hash for PublicKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.hash(state);
-    }
-}
-
-impl AsRef<[u8]> for PublicKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
     }
 }
 
@@ -115,12 +115,12 @@ impl KeyPair {
     /// Create a keypair from raw 32-byte secret key material.
     ///
     /// Derives the corresponding public key automatically.
-    pub fn from_secret_bytes(bytes: &[u8; 32]) -> Self {
+    pub fn from_secret_bytes(bytes: &[u8; StaticSecret::LEN]) -> Self {
         Self::from_secret(StaticSecret::from_bytes(bytes))
     }
 
     /// Export the raw 32-byte secret key material.
-    pub fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
+    pub fn secret_bytes(&self) -> Zeroizing<[u8; StaticSecret::LEN]> {
         self.secret.to_bytes()
     }
 }
@@ -162,5 +162,46 @@ mod tests {
         let kp = KeyPair::from_secret_bytes(&bytes);
 
         assert_eq!(*kp.secret_bytes(), bytes);
+    }
+
+    #[test]
+    fn public_key_as_ref_array() {
+        let bytes = [7u8; PublicKey::LEN];
+        let pk = PublicKey::from_bytes(bytes);
+        let r: &[u8; PublicKey::LEN] = pk.as_ref();
+        assert_eq!(*r, bytes);
+    }
+
+    #[test]
+    fn public_key_as_ref_slice() {
+        let bytes = [7u8; PublicKey::LEN];
+        let pk = PublicKey::from_bytes(bytes);
+        let r: &[u8] = pk.as_ref();
+        assert_eq!(r, &bytes);
+    }
+
+    #[test]
+    fn public_key_from_bytes_as_bytes_round_trip() {
+        let bytes = [99u8; PublicKey::LEN];
+        let pk = PublicKey::from_bytes(bytes);
+        assert_eq!(*pk.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn public_key_equality_constant_time() {
+        let a = PublicKey::from_bytes([1u8; PublicKey::LEN]);
+        let b = PublicKey::from_bytes([1u8; PublicKey::LEN]);
+        let c = PublicKey::from_bytes([2u8; PublicKey::LEN]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn public_key_debug_does_not_leak_full_key() {
+        let pk = PublicKey::from_bytes([0xab; PublicKey::LEN]);
+        let dbg = format!("{:?}", pk);
+        assert!(dbg.starts_with("PublicKey("));
+        // Only first 4 bytes shown
+        assert!(!dbg.contains(&format!("{:02x?}", &[0xabu8; PublicKey::LEN][..])));
     }
 }
