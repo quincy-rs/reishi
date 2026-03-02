@@ -139,10 +139,7 @@ async fn pq_peer_identity_available() {
         .expect("client should have peer identity")
         .downcast::<PeerIdentity>()
         .expect("should downcast to PeerIdentity");
-    assert_eq!(
-        client_peer.public_key,
-        *server_public.dh_public().as_bytes()
-    );
+    assert_eq!(client_peer.public_key, *server_public.dh_public());
 
     // Client sees server's full PQ public key
     let client_pq = client_peer
@@ -161,10 +158,7 @@ async fn pq_peer_identity_available() {
         .expect("server should have peer identity")
         .downcast::<PeerIdentity>()
         .expect("should downcast to PeerIdentity");
-    assert_eq!(
-        server_peer.public_key,
-        *client_public.dh_public().as_bytes()
-    );
+    assert_eq!(server_peer.public_key, *client_public.dh_public());
 
     // Server sees client's full PQ public key
     let server_pq = server_peer

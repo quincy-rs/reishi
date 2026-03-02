@@ -102,8 +102,8 @@ pub const ASK_LABEL: &[u8] = b"reishi key";
 /// Downcast the `Box<dyn Any>` to this type.
 #[derive(Debug, Clone)]
 pub struct PeerIdentity {
-    /// The peer's static X25519 public key (32 bytes).
-    pub public_key: [u8; 32],
+    /// The peer's static X25519 public key.
+    pub public_key: PublicKey,
     /// The final Noise handshake hash (channel binding value, 32 bytes).
     pub handshake_hash: [u8; 32],
     /// The peer's full hybrid PQ public key (if PQ handshake).

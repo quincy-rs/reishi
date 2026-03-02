@@ -19,7 +19,7 @@ use crate::active_handshake::{ActiveHandshake, RemoteIdentity};
 use crate::framing::HandshakeMessageFramer;
 use crate::initial::{initial_level_secret, retry_tag_key};
 use crate::keys::{keys_from_level_secret, packet_keys_from_level_secret};
-use crate::{ASK_LABEL, NoiseConfig, PeerIdentity};
+use crate::{ASK_LABEL, NoiseConfig, PeerIdentity, PublicKey};
 
 #[cfg(feature = "pq")]
 use crate::pq_config::PqNoiseConfig;
@@ -466,7 +466,7 @@ impl crypto::Session for NoiseSession {
                 let remote = h.remote_dh_public_bytes()?;
                 let hash = *h.handshake_hash().ok()?;
                 Some(Box::new(PeerIdentity {
-                    public_key: remote,
+                    public_key: PublicKey::from_bytes(remote),
                     handshake_hash: hash,
                     #[cfg(feature = "pq")]
                     pq_public_key: h.remote_pq_public(),
@@ -479,7 +479,7 @@ impl crypto::Session for NoiseSession {
                 remote_pq_public,
                 ..
             } => Some(Box::new(PeerIdentity {
-                public_key: *remote_public,
+                public_key: PublicKey::from_bytes(*remote_public),
                 handshake_hash: *handshake_hash,
                 #[cfg(feature = "pq")]
                 pq_public_key: remote_pq_public.clone(),
@@ -491,7 +491,7 @@ impl crypto::Session for NoiseSession {
                 remote_pq_public,
                 ..
             } => Some(Box::new(PeerIdentity {
-                public_key: *remote_public,
+                public_key: PublicKey::from_bytes(*remote_public),
                 handshake_hash: *handshake_hash,
                 #[cfg(feature = "pq")]
                 pq_public_key: remote_pq_public.clone(),
