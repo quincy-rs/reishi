@@ -3,7 +3,6 @@
 //! Derives the initial encryption keys that protect the Initial packet
 //! space before the Noise handshake produces keying material.
 
-use rand_core::RngCore;
 use reishi_handshake::crypto::aead::AEAD_KEY_LEN;
 use reishi_handshake::crypto::hash::{HASH_LEN, hkdf2};
 use zeroize::Zeroize;
@@ -62,42 +61,44 @@ pub fn derive_key_pair(level_secret: &[u8; HASH_LEN]) -> (DirectionalKeys, Direc
     (init_keys, resp_keys)
 }
 
-/// Derive the retry tag key from the original destination connection ID.
-pub fn retry_tag_key(orig_dst_cid: &[u8]) -> [u8; AEAD_KEY_LEN] {
-    let salt = reishi_handshake::crypto::hash::hash(crate::RETRY_LABEL);
-    let (key_material, _) = hkdf2(&salt, orig_dst_cid);
-    let mut key = [0u8; AEAD_KEY_LEN];
-    key.copy_from_slice(&(*key_material)[..AEAD_KEY_LEN]);
-    key
+/// The well-known retry integrity key.
+///
+/// Both client and server use this same publicly-known key to generate
+/// and validate retry tags. This matches the approach used by
+/// quinn-rustls (RFC 9001 §5.8) and quinn-noise, where the retry
+/// integrity key is not a secret — the real protection against retry
+/// forgery comes from the handshake transcript binding and server-side
+/// token validation via `HandshakeTokenKey`.
+pub fn retry_integrity_key() -> [u8; HASH_LEN] {
+    reishi_handshake::crypto::hash::hash(crate::RETRY_LABEL)
 }
 
-/// Compute a retry tag for the given packet using AEAD encryption.
+/// Compute a retry tag for the given packet using HMAC-BLAKE2s.
 ///
-/// Returns the 16-byte authentication tag over `packet` using a key
-/// derived from `orig_dst_cid`.
+/// Constructs a pseudo-packet by prepending the length-prefixed
+/// original destination connection ID to `packet`, then computes
+/// HMAC-BLAKE2s over the pseudo-packet using the well-known retry
+/// integrity key. Returns the first 16 bytes as the retry tag.
+///
+/// Uses HMAC rather than AEAD to avoid nonce-reuse vulnerabilities
+/// when the same `orig_dst_cid` is used multiple times.
 pub fn compute_retry_tag(
     orig_dst_cid: &quinn_proto::ConnectionId,
     packet: &[u8],
 ) -> [u8; reishi_handshake::crypto::aead::AEAD_TAG_LEN] {
-    let key = retry_tag_key(orig_dst_cid);
+    let key = retry_integrity_key();
 
-    let plaintext_len = packet.len();
-    let mut buf = Vec::with_capacity(plaintext_len + reishi_handshake::crypto::aead::AEAD_TAG_LEN);
-    buf.extend_from_slice(packet);
-    buf.extend_from_slice(&[0u8; reishi_handshake::crypto::aead::AEAD_TAG_LEN]);
+    // Build a pseudo-packet: [cid_len, cid..., packet...]
+    // This binds the tag to both the connection ID and the packet contents.
+    let mut pseudo_packet = Vec::with_capacity(1 + orig_dst_cid.len() + packet.len());
+    pseudo_packet.push(orig_dst_cid.len() as u8);
+    pseudo_packet.extend_from_slice(orig_dst_cid);
+    pseudo_packet.extend_from_slice(packet);
 
-    // Buffer is always correctly sized: plaintext_len + AEAD_TAG_LEN.
-    // If encryption somehow fails, return a random-looking tag rather than panicking.
-    if reishi_handshake::crypto::aead::encrypt_in_place(&key, 0, b"", &mut buf, plaintext_len)
-        .is_err()
-    {
-        let mut tag = [0u8; reishi_handshake::crypto::aead::AEAD_TAG_LEN];
-        rand_core::OsRng.fill_bytes(&mut tag);
-        return tag;
-    }
+    let hmac_output = reishi_handshake::crypto::hash::hmac(&key, &pseudo_packet);
 
     let mut tag = [0u8; 16];
-    tag.copy_from_slice(&buf[plaintext_len..]);
+    tag.copy_from_slice(&hmac_output[..16]);
     tag
 }
 
@@ -152,16 +153,36 @@ mod tests {
     }
 
     #[test]
-    fn retry_tag_key_deterministic() {
-        let k1 = retry_tag_key(b"orig-dcid");
-        let k2 = retry_tag_key(b"orig-dcid");
+    fn retry_integrity_key_deterministic() {
+        let k1 = retry_integrity_key();
+        let k2 = retry_integrity_key();
         assert_eq!(k1, k2);
     }
 
     #[test]
-    fn retry_tag_key_different_cids() {
-        let k1 = retry_tag_key(b"cid-1");
-        let k2 = retry_tag_key(b"cid-2");
-        assert_ne!(k1, k2);
+    fn compute_retry_tag_deterministic() {
+        let cid = quinn_proto::ConnectionId::new(b"test-dcid");
+        let packet = b"retry-packet-data";
+        let tag1 = compute_retry_tag(&cid, packet);
+        let tag2 = compute_retry_tag(&cid, packet);
+        assert_eq!(tag1, tag2);
+    }
+
+    #[test]
+    fn compute_retry_tag_different_packets() {
+        let cid = quinn_proto::ConnectionId::new(b"test-dcid");
+        let tag1 = compute_retry_tag(&cid, b"packet-1");
+        let tag2 = compute_retry_tag(&cid, b"packet-2");
+        assert_ne!(tag1, tag2);
+    }
+
+    #[test]
+    fn compute_retry_tag_different_cids() {
+        let cid1 = quinn_proto::ConnectionId::new(b"cid-1");
+        let cid2 = quinn_proto::ConnectionId::new(b"cid-2");
+        let packet = b"same-packet";
+        let tag1 = compute_retry_tag(&cid1, packet);
+        let tag2 = compute_retry_tag(&cid2, packet);
+        assert_ne!(tag1, tag2);
     }
 }
