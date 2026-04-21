@@ -27,6 +27,14 @@ use crate::pq_config::PqNoiseConfig;
 /// TLS alert code for handshake failure (used in QUIC crypto error frames).
 const TLS_HANDSHAKE_FAILURE: u8 = 40;
 
+/// Maximum allowed size for a Retry packet (header + payload).
+///
+/// Protects against unbounded allocations from malicious oversized Retry packets.
+/// Retry packets are typically small (header + token + tag, usually < 512 bytes).
+/// This conservative limit of 65527 bytes (max UDP payload) prevents DoS via
+/// repeated large allocations while accommodating any legitimate Retry packet.
+const MAX_RETRY_PACKET_SIZE: usize = 65527;
+
 /// Internal handshake state: either in-progress or completed.
 pub(crate) enum HandshakeState {
     /// Active handshake.
@@ -577,6 +585,12 @@ impl crypto::Session for NoiseSession {
 
     fn is_valid_retry(&self, orig_dst_cid: &ConnectionId, header: &[u8], payload: &[u8]) -> bool {
         if payload.len() < AEAD_TAG_LEN {
+            return false;
+        }
+
+        // Reject oversized Retry packets to prevent unbounded allocation/copy.
+        let total_len = header.len().saturating_add(payload.len());
+        if total_len > MAX_RETRY_PACKET_SIZE {
             return false;
         }
 
