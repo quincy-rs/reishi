@@ -3,6 +3,12 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use crate::crypto::aead::{self, AEAD_KEY_LEN, AEAD_TAG_LEN};
 use crate::error::Error;
 
+/// Maximum ciphertext size accepted by decrypt operations.
+///
+/// Defense-in-depth limit to prevent unbounded temporary allocations.
+/// Aligned with handshake message limits to ensure consistency.
+const MAX_CIPHERTEXT_LEN: usize = 65535;
+
 /// Noise CipherState — manages an AEAD key and a nonce counter.
 ///
 /// Per Noise spec Section 5.1.
@@ -95,6 +101,10 @@ impl CipherState {
                     return Err(Error::NonceExhausted);
                 }
                 if ciphertext.len() < AEAD_TAG_LEN {
+                    return Err(Error::BadMessage);
+                }
+                // Defense-in-depth: reject oversized ciphertext to prevent unbounded allocation
+                if ciphertext.len() > MAX_CIPHERTEXT_LEN {
                     return Err(Error::BadMessage);
                 }
                 let plaintext_len = ciphertext.len() - AEAD_TAG_LEN;
@@ -268,5 +278,79 @@ mod tests {
 
         // Same plaintext, different nonce -> different ciphertext
         assert_ne!(&ct1[..len1], &ct2[..len2]);
+    }
+
+    #[test]
+    fn decrypt_rejects_oversized_ciphertext() {
+        // Test that a ciphertext of 65536 bytes (one byte over limit) is rejected
+        let key = [0x42u8; AEAD_KEY_LEN];
+        let mut cs = CipherState::empty();
+        cs.initialize_key(key);
+
+        let oversized = vec![0u8; 65536];
+        let mut out = vec![0u8; 65536];
+
+        let result = cs.decrypt_with_ad(b"", &oversized, &mut out);
+        assert_eq!(result, Err(Error::BadMessage));
+    }
+
+    #[test]
+    fn decrypt_accepts_max_size_ciphertext() {
+        // Test that exactly 65535 bytes (MAX_CIPHERTEXT_LEN) is accepted
+        // We encrypt a large plaintext and ensure decryption works
+        let key = [0x42u8; AEAD_KEY_LEN];
+        let mut enc = CipherState::empty();
+        enc.initialize_key(key);
+        let mut dec = CipherState::empty();
+        dec.initialize_key(key);
+
+        // Plaintext: 65535 - 16 (AEAD_TAG_LEN) = 65519 bytes
+        let plaintext = vec![0x5Au8; 65519];
+        let mut ct = vec![0u8; 65535];
+        let ct_len = enc.encrypt_with_ad(b"", &plaintext, &mut ct).unwrap();
+        assert_eq!(ct_len, 65535);
+
+        // Decrypt with output buffer large enough for plaintext but not ciphertext+tag
+        // This exercises the temp Vec path
+        let mut out = vec![0u8; 65519];
+        let pt_len = dec.decrypt_with_ad(b"", &ct[..ct_len], &mut out).unwrap();
+        assert_eq!(pt_len, 65519);
+        assert_eq!(&out[..pt_len], &plaintext[..]);
+    }
+
+    #[test]
+    fn decrypt_rejects_one_byte_over_limit() {
+        // Test boundary condition: exactly one byte over the limit
+        let key = [0x42u8; AEAD_KEY_LEN];
+        let mut cs = CipherState::empty();
+        cs.initialize_key(key);
+
+        let oversized = vec![0u8; MAX_CIPHERTEXT_LEN + 1];
+        let mut out = vec![0u8; MAX_CIPHERTEXT_LEN + 1];
+
+        let result = cs.decrypt_with_ad(b"", &oversized, &mut out);
+        assert_eq!(result, Err(Error::BadMessage));
+    }
+
+    #[test]
+    fn decrypt_temp_vec_path_with_max_size() {
+        // Test that the temp Vec allocation path works with max-size ciphertext
+        // when out buffer is sized for plaintext only
+        let key = [0x42u8; AEAD_KEY_LEN];
+        let mut enc = CipherState::empty();
+        enc.initialize_key(key);
+        let mut dec = CipherState::empty();
+        dec.initialize_key(key);
+
+        // Create max-size ciphertext
+        let plaintext = vec![0x7Bu8; 65519];
+        let mut ct = vec![0u8; 65535];
+        let ct_len = enc.encrypt_with_ad(b"", &plaintext, &mut ct).unwrap();
+
+        // Output buffer exactly sized for plaintext (triggers temp Vec path)
+        let mut out = vec![0u8; 65519];
+        let pt_len = dec.decrypt_with_ad(b"", &ct[..ct_len], &mut out).unwrap();
+        assert_eq!(pt_len, 65519);
+        assert_eq!(&out[..], &plaintext[..]);
     }
 }

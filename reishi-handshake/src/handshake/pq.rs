@@ -38,6 +38,14 @@ use crate::transport::TransportState;
 /// The Noise protocol name for the hybrid PQ ciphersuite.
 pub const PQ_PROTOCOL_NAME: &str = "Noise_IKpq_25519+MLKEM768_ChaChaPoly_BLAKE2s";
 
+/// Maximum accepted handshake message size in bytes.
+///
+/// Limits memory consumption from unauthenticated peers during handshake processing.
+/// This value (65535 = u16::MAX) provides ample room for legitimate PQ handshake messages
+/// while preventing unbounded allocation attacks. PQ IK Message 1 is ~4640 bytes plus
+/// application payload, so this limit is more than sufficient.
+pub const MAX_MESSAGE_LEN: usize = 65535;
+
 /// Message 1 overhead (no payload):
 /// e_dh(32) + e_kem(1184) + es_ct(1088) + encrypted_s(1216+16) + ss_ct(1088) + payload_tag(16)
 const MSG1_OVERHEAD: usize = DH_LEN                          // 32
@@ -219,6 +227,10 @@ impl PqHandshake {
 
     /// Read a handshake message from the peer.
     pub fn read_message(&mut self, message: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+        // Enforce maximum message size to prevent unbounded memory allocation
+        if message.len() > MAX_MESSAGE_LEN {
+            return Err(Error::BadMessage);
+        }
         match self.phase {
             Phase::ResponderReadMsg1 => self.read_msg1(message, out),
             Phase::InitiatorReadMsg2 => self.read_msg2(message, out),

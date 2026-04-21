@@ -5,6 +5,13 @@ use crate::crypto::aead::AEAD_TAG_LEN;
 use crate::crypto::hash::HASH_LEN;
 use crate::error::Error;
 
+/// Maximum accepted transport message size in bytes.
+///
+/// Prevents unbounded memory allocation from peers sending oversized messages.
+/// This limit (65535 = u16::MAX) is consistent with handshake limits and allows
+/// for large application payloads while preventing DoS attacks.
+const MAX_MESSAGE_LEN: usize = 65535;
+
 /// Post-handshake transport encryption state.
 ///
 /// Contains two `CipherState`s: one for sending, one for receiving.
@@ -57,6 +64,10 @@ impl TransportState {
     ///
     /// Returns the number of plaintext bytes written to `out`.
     pub fn read_message(&mut self, message: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+        // Enforce maximum message size to prevent unbounded memory allocation
+        if message.len() > MAX_MESSAGE_LEN {
+            return Err(Error::BadMessage);
+        }
         self.recv.decrypt_with_ad(&[], message, out)
     }
 
