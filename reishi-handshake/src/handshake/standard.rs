@@ -10,6 +10,15 @@ use crate::symmetric_state::SymmetricState;
 
 /// The Noise protocol name for the fixed ciphersuite.
 pub const PROTOCOL_NAME: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
+
+/// Maximum accepted handshake message size in bytes.
+///
+/// Limits memory consumption from unauthenticated peers during handshake processing.
+/// This value (65535 = u16::MAX) provides ample room for legitimate handshake messages
+/// while preventing unbounded allocation attacks. Standard Noise IK messages are
+/// typically < 200 bytes plus application payload.
+pub const MAX_MESSAGE_LEN: usize = 65535;
+
 use crate::keys::{KeyPair, PublicKey, StaticSecret};
 use crate::transport::TransportState;
 
@@ -177,6 +186,10 @@ impl Handshake {
     ///
     /// Returns the number of decrypted payload bytes written to `out`.
     pub fn read_message(&mut self, message: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+        // Enforce maximum message size to prevent unbounded memory allocation
+        if message.len() > MAX_MESSAGE_LEN {
+            return Err(Error::BadMessage);
+        }
         match self.phase {
             Phase::ResponderReadMsg1 => self.read_msg1(message, out),
             Phase::InitiatorReadMsg2 => self.read_msg2(message, out),
