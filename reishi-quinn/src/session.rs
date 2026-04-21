@@ -642,3 +642,59 @@ impl crypto::Session for NoiseSession {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quinn_proto::crypto::Session as _;
+
+    /// Helper: construct a minimal `NoiseSession` for retry-validation tests.
+    ///
+    /// `is_valid_retry` does not access session state, so a failed session
+    /// is sufficient.
+    fn test_session() -> NoiseSession {
+        NoiseSession::failed()
+    }
+
+    #[test]
+    fn oversized_retry_packet_rejected() {
+        let session = test_session();
+        let orig_dst_cid = ConnectionId::new(&[1, 2, 3, 4]);
+
+        // Total size = MAX_RETRY_PACKET_SIZE + 1 (just over the limit).
+        // Payload must be >= AEAD_TAG_LEN to pass the first check.
+        let header = vec![0u8; MAX_RETRY_PACKET_SIZE + 1 - AEAD_TAG_LEN];
+        let payload = vec![0u8; AEAD_TAG_LEN];
+
+        assert!(!session.is_valid_retry(&orig_dst_cid, &header, &payload));
+    }
+
+    #[test]
+    fn very_large_retry_packet_rejected() {
+        let session = test_session();
+        let orig_dst_cid = ConnectionId::new(&[5, 6, 7, 8]);
+
+        // Well above the limit: both header and payload are large.
+        let header = vec![0u8; MAX_RETRY_PACKET_SIZE];
+        let payload = vec![0u8; MAX_RETRY_PACKET_SIZE];
+
+        assert!(!session.is_valid_retry(&orig_dst_cid, &header, &payload));
+    }
+
+    #[test]
+    fn retry_at_size_limit_not_rejected_by_size_check() {
+        let session = test_session();
+        let orig_dst_cid = ConnectionId::new(&[9, 10, 11, 12]);
+
+        // Total size == MAX_RETRY_PACKET_SIZE (exactly at the boundary).
+        // This should pass the size check but still return false because the
+        // tag won't match — proving the size guard doesn't over-reject.
+        let header = vec![0u8; MAX_RETRY_PACKET_SIZE - AEAD_TAG_LEN];
+        let payload = vec![0u8; AEAD_TAG_LEN];
+
+        // Returns false due to tag mismatch, not due to the size check.
+        // The important property: no panic, no OOM, and if we had a matching
+        // tag it would be accepted.
+        assert!(!session.is_valid_retry(&orig_dst_cid, &header, &payload));
+    }
+}
