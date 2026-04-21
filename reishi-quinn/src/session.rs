@@ -17,7 +17,7 @@ use zeroize::Zeroize;
 
 use crate::active_handshake::{ActiveHandshake, RemoteIdentity};
 use crate::framing::HandshakeMessageFramer;
-use crate::initial::{initial_level_secret, retry_tag_key};
+use crate::initial::{initial_level_secret, retry_integrity_key};
 use crate::keys::{keys_from_level_secret, packet_keys_from_level_secret};
 use crate::{ASK_LABEL, NoiseConfig, PeerIdentity, PublicKey};
 
@@ -594,28 +594,21 @@ impl crypto::Session for NoiseSession {
             return false;
         }
 
-        let key = retry_tag_key(orig_dst_cid);
+        let key = retry_integrity_key();
 
+        // Reconstruct the pseudo-packet: [cid_len, cid..., header..., payload_without_tag...]
+        // This must match the construction in compute_retry_tag, where
+        // packet = header + payload_without_tag.
         let tag_offset = payload.len() - AEAD_TAG_LEN;
-        let mut packet = Vec::with_capacity(header.len() + payload.len());
-        packet.extend_from_slice(header);
-        packet.extend_from_slice(&payload[..tag_offset]);
+        let mut pseudo_packet =
+            Vec::with_capacity(1 + orig_dst_cid.len() + header.len() + tag_offset);
+        pseudo_packet.push(orig_dst_cid.len() as u8);
+        pseudo_packet.extend_from_slice(orig_dst_cid);
+        pseudo_packet.extend_from_slice(header);
+        pseudo_packet.extend_from_slice(&payload[..tag_offset]);
 
-        let plaintext_len = packet.len();
-        packet.extend_from_slice(&[0u8; AEAD_TAG_LEN]);
-        if reishi_handshake::crypto::aead::encrypt_in_place(
-            &key,
-            0,
-            b"",
-            &mut packet,
-            plaintext_len,
-        )
-        .is_err()
-        {
-            return false;
-        }
-
-        let computed_tag = &packet[plaintext_len..];
+        let hmac_output = hmac(&key, &pseudo_packet);
+        let computed_tag = &hmac_output[..AEAD_TAG_LEN];
         let received_tag = &payload[tag_offset..];
 
         subtle::ConstantTimeEq::ct_eq(computed_tag, received_tag).into()
