@@ -902,3 +902,151 @@ fn ask_before_complete_fails() {
         );
     }
 }
+
+#[test]
+fn classical_and_transport_writers_enforce_message_limit() {
+    const MAX_MESSAGE_LEN: usize = 65535;
+    const MESSAGE_1_OVERHEAD: usize = 96;
+    const MESSAGE_2_OVERHEAD: usize = 48;
+    const TRANSPORT_OVERHEAD: usize = 16;
+
+    let mut rng = rand::thread_rng();
+    let initiator_keypair = KeyPair::generate(&mut rng);
+    let responder_keypair = KeyPair::generate(&mut rng);
+    let mut output = vec![0u8; MAX_MESSAGE_LEN + 1];
+    let mut payload_output = vec![0u8; MAX_MESSAGE_LEN];
+
+    let mut exact_initiator =
+        Handshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let exact_message_1_payload = vec![0u8; MAX_MESSAGE_LEN - MESSAGE_1_OVERHEAD];
+
+    assert_eq!(
+        exact_initiator
+            .write_message(&exact_message_1_payload, &mut output)
+            .unwrap(),
+        MAX_MESSAGE_LEN,
+    );
+
+    let mut oversized_initiator =
+        Handshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let oversized_message_1_payload = vec![0u8; MAX_MESSAGE_LEN + 1 - MESSAGE_1_OVERHEAD];
+
+    assert_eq!(
+        oversized_initiator.write_message(&oversized_message_1_payload, &mut output),
+        Err(Error::BadMessage),
+    );
+    assert_eq!(
+        oversized_initiator.next_action(),
+        HandshakeAction::WriteMessage,
+    );
+
+    let mut initiator =
+        Handshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut exact_responder = Handshake::new_responder(&responder_keypair, &[]).unwrap();
+    let message_1_len = initiator.write_message(&[], &mut output).unwrap();
+
+    exact_responder
+        .read_message(&output[..message_1_len], &mut payload_output)
+        .unwrap();
+
+    let exact_message_2_payload = vec![0u8; MAX_MESSAGE_LEN - MESSAGE_2_OVERHEAD];
+
+    assert_eq!(
+        exact_responder
+            .write_message(&exact_message_2_payload, &mut output)
+            .unwrap(),
+        MAX_MESSAGE_LEN,
+    );
+
+    let mut initiator =
+        Handshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut oversized_responder = Handshake::new_responder(&responder_keypair, &[]).unwrap();
+    let message_1_len = initiator.write_message(&[], &mut output).unwrap();
+
+    oversized_responder
+        .read_message(&output[..message_1_len], &mut payload_output)
+        .unwrap();
+
+    let oversized_message_2_payload = vec![0u8; MAX_MESSAGE_LEN + 1 - MESSAGE_2_OVERHEAD];
+
+    assert_eq!(
+        oversized_responder.write_message(&oversized_message_2_payload, &mut output),
+        Err(Error::BadMessage),
+    );
+    assert_eq!(
+        oversized_responder.next_action(),
+        HandshakeAction::WriteMessage,
+    );
+
+    let (mut initiator_transport, mut responder_transport) =
+        reishi_handshake_pair(&initiator_keypair, &responder_keypair, &[], &[], &[]);
+    let exact_transport_payload = vec![0u8; MAX_MESSAGE_LEN - TRANSPORT_OVERHEAD];
+    let ciphertext_len = initiator_transport
+        .write_message(&exact_transport_payload, &mut output)
+        .unwrap();
+
+    assert_eq!(ciphertext_len, MAX_MESSAGE_LEN);
+    assert_eq!(
+        responder_transport
+            .read_message(&output[..ciphertext_len], &mut payload_output)
+            .unwrap(),
+        exact_transport_payload.len(),
+    );
+
+    let oversized_transport_payload = vec![0u8; MAX_MESSAGE_LEN + 1 - TRANSPORT_OVERHEAD];
+
+    assert_eq!(
+        initiator_transport.write_message(&oversized_transport_payload, &mut output),
+        Err(Error::BadMessage),
+    );
+}
+
+#[test]
+fn classical_payload_buffer_errors_are_retryable() {
+    let mut rng = rand::thread_rng();
+    let initiator_keypair = KeyPair::generate(&mut rng);
+    let responder_keypair = KeyPair::generate(&mut rng);
+    let mut initiator =
+        Handshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = Handshake::new_responder(&responder_keypair, &[]).unwrap();
+    let mut message = vec![0u8; 1024];
+    let mut payload_output = vec![0u8; 1024];
+
+    let message_1_payload = b"initiator payload";
+    let message_1_length = initiator
+        .write_message(message_1_payload, &mut message)
+        .unwrap();
+
+    assert_eq!(
+        responder.read_message(&message[..message_1_length], &mut []),
+        Err(Error::BufferTooSmall),
+    );
+    assert_eq!(responder.next_action(), HandshakeAction::ReadMessage);
+
+    let payload_length = responder
+        .read_message(&message[..message_1_length], &mut payload_output)
+        .unwrap();
+    assert_eq!(&payload_output[..payload_length], message_1_payload);
+
+    let message_2_payload = b"responder payload";
+    let message_2_length = responder
+        .write_message(message_2_payload, &mut message)
+        .unwrap();
+
+    assert_eq!(
+        initiator.read_message(&message[..message_2_length], &mut []),
+        Err(Error::BufferTooSmall),
+    );
+    assert_eq!(initiator.next_action(), HandshakeAction::ReadMessage);
+
+    let payload_length = initiator
+        .read_message(&message[..message_2_length], &mut payload_output)
+        .unwrap();
+    assert_eq!(&payload_output[..payload_length], message_2_payload);
+    assert_eq!(initiator.next_action(), HandshakeAction::Complete);
+    assert_eq!(responder.next_action(), HandshakeAction::Complete);
+    assert_eq!(
+        initiator.handshake_hash().unwrap(),
+        responder.handshake_hash().unwrap(),
+    );
+}

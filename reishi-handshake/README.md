@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/reishi-handshake/badge.svg)](https://docs.rs/reishi-handshake/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../LICENSE)
 
-Pure, sans-IO implementation of the [Noise Protocol](https://noiseprotocol.org/noise.html) IK handshake with optional post-quantum hybrid mode.
+Pure, sans-IO implementation of the [Noise Protocol](https://noiseprotocol.org/noise.html) IK handshake with optional KEM-only and hybrid post-quantum modes.
 
 ## The IK pattern
 
@@ -38,47 +38,58 @@ Noise_IK_25519_ChaChaPoly_BLAKE2s
 
 No algorithm negotiation means no downgrade attacks and no implementation bugs from having multiple code paths. Both peers must agree on this ciphersuite out-of-band.
 
-## Post-quantum hybrid mode
+## Post-quantum modes
 
-The `pq` feature enables a hybrid classical + post-quantum IK handshake based on the [PQNoise framework](https://eprint.iacr.org/2022/539):
+The `pq` feature enables two confirmed handshakes based on the [PQNoise framework](https://eprint.iacr.org/2022/539):
 
 ```
-Noise_IKpq_25519+MLKEM768_ChaChaPoly_BLAKE2s
+Noise_pqIKkc_MLKEM768_ChaChaPoly_BLAKE2s
+Noise_hybridIKkc_25519+MLKEM768_ChaChaPoly_BLAKE2s
 ```
 
 ### How it works
 
-Each DH token in the standard IK pattern is augmented with a KEM operation. For every `DH(a, B)`, we also perform an ML-KEM-768 encapsulation against the corresponding KEM public key. Both shared secrets are mixed into the chaining key via `MixKey()`. Compromise of either primitive alone does not break the handshake.
-
-The token ordering within each DH step is: `MixKey(dh_ss)`, write/read ciphertext, `MixHash(ct)`, `MixKey(kem_ss)`.
+The KEM-only suite implements optimized `pqIK`. The hybrid suite combines classical IK tokens with `pqIK`; compromise of either X25519 or ML-KEM alone does not recover the session.
 
 ```
-IKpq:
+pqIK:
+  <- s_kem
+  ...
+  -> skem_r, ENC(e_kem_i, s_kem_i)
+  <- ekem_i, ENC(skem_i), payload_r
+  -> ENC(confirm, payload_i)
+
+hybrid IK + pqIK:
   <- s_dh, s_kem
   ...
-  -> e_dh, e_kem,
-     DH(e, rs) + KEM_ENCAPS(rs_kem),
-     s_dh, s_kem,
-     DH(s, rs) + KEM_ENCAPS(rs_kem)
-  <- e_dh, e_kem,
-     DH(e, ie) + KEM_ENCAPS(ie_kem),
-     DH(e, is) + KEM_ENCAPS(is_kem)
+  -> skem_r, e_dh_i, es, ENC(e_kem_i, s_dh_i, s_kem_i), ss
+  <- ekem_i, ENC(skem_i), e_dh_r, ee, se, payload_r
+  -> ENC(confirm, payload_i)
 ```
+
+The responder does not expose the claimed initiator identity, ASK, or transport keys until the third flight verifies. Message 1 cannot carry application payload, preventing the responder from consuming unauthenticated client data.
+
+Every transmitted raw or AEAD ciphertext is mixed into the transcript, and every KEM or DH shared secret is mixed into the chaining key in pattern order.
+
+Ephemeral ML-KEM generation, ML-KEM encapsulation, and hybrid ephemeral X25519 generation use a domain-separated KDF-SEEC profile. Each static secret stores an independent 32-byte SEEC key. Fresh 32-byte session coins are combined with that key using HMAC-BLAKE2s and HKDF expansion; static key generation continues to use the secure RNG directly. This profile hardens predictable or exposed coins while the persistent SEEC key remains secret, but does not protect against maliciously chosen or repeating entropy. Stateful or hardware-backed SEEC is the upgrade path for that threat.
 
 ### Why ML-KEM-768
 
 ML-KEM-768 (FIPS 203) is the NIST-standardized post-quantum KEM at the 128-bit security level. Its key and ciphertext sizes are large but manageable:
 
-| | Classical IK | Hybrid IK |
-|---|---|---|
-| Message 1 (no payload) | ~96 bytes | ~4,640 bytes |
-| Message 2 (no payload) | ~48 bytes | ~3,408 bytes |
+| | Classical IK | KEM-only pqIK | Hybrid IK + pqIK |
+|---|---:|---:|---:|
+| Message 1 | 96 bytes | 3,472 bytes | 3,536 bytes |
+| Message 2 | 48 bytes | 2,208 bytes | 2,240 bytes |
+| Message 3 | — | 16 bytes | 16 bytes |
 
 These sizes are already routine in practice. TLS 1.3 + ML-KEM deployments by Chrome and Cloudflare operate in the same range, and QUIC handles multi-packet Initial flights through CRYPTO frame reassembly.
 
 ### Caveats
 
 There is no finalized Noise specification for PQ extensions, so the PQNoise paper is the best available reference. No other Noise library implements this mode, which means testing is limited to self-interop and known-answer tests with fixed randomness.
+
+PQNoise normally transmits ephemeral public-key shares in the clear. Reishi deliberately encrypts the initiator's ephemeral ML-KEM public key together with its static keys after `skem_r` establishes an AEAD key. This hides that metadata and authenticates it earlier, but makes these custom `pqIKkc` suites wire-incompatible with a literal implementation of the paper's pattern.
 
 Static ML-KEM keys are reused across sessions. ML-KEM is designed to support this (unlike some earlier lattice KEMs), but it is worth noting as a different model than ephemeral-only usage.
 
@@ -90,11 +101,13 @@ Static ML-KEM keys are reused across sessions. ML-KEM is designed to support thi
 
 **HMAC construction.** Reishi uses standard RFC 2104 HMAC over BLAKE2s, not BLAKE2's built-in keyed mode. This was a deliberate choice for interoperability with `snow` and other Noise implementations.
 
+**Classical IK replay.** A valid classical Message 1 authenticates its source but can be replayed, so responder-side authentication at that point does not establish peer freshness or liveness. Integrations should expose peer identity only after the full handshake; the Quinn integration does so.
+
 **No panics on network input.** All code paths reachable from untrusted input return `Result::Err`. There are no `unreachable!()`, `unwrap()`, or `todo!()` calls in the handshake or transport state machines.
 
 ## Interop
 
-The classical IK mode is tested against [snow](https://github.com/mcginty/snow), the reference Noise implementation for Rust. The PQ hybrid mode has no external implementations to test against (there is no finalized Noise PQ spec yet), so it relies on self-interop and known-answer tests with fixed randomness.
+The classical IK mode is tested against [snow](https://github.com/mcginty/snow), the reference Noise implementation for Rust. The PQ modes have no external implementations to test against, so they rely on self-interop, fixed SEEC vectors, tampering tests, and explicit confirmation regressions.
 
 ## Usage
 

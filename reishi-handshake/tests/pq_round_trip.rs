@@ -1,679 +1,801 @@
-//! Integration tests for the hybrid PQ Noise IK handshake.
-//!
-//! Tests `Noise_IKpq_25519+MLKEM768_ChaChaPoly_BLAKE2s` for correctness,
-//! state machine safety, and transport interoperability.
-
 #![cfg(feature = "pq")]
 
 use rand_core::OsRng;
-use reishi_handshake::{Error, HandshakeAction, PqHandshake, PqKeyPair, TransportState};
+use reishi_handshake::{
+    Error, HandshakeAction, HybridHandshake, HybridKeyPair, PqHandshake, PqKeyPair,
+};
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const BUFFER_LEN: usize = 65535;
 
-/// Drive a full PQ handshake with optional payloads.
-/// Returns (initiator_transport, responder_transport).
-fn pq_handshake_pair(
-    initiator_kp: &PqKeyPair,
-    responder_kp: &PqKeyPair,
-    prologue: &[u8],
-    msg1_payload: &[u8],
-    msg2_payload: &[u8],
-) -> (TransportState, TransportState) {
+fn complete_pq_handshake(
+    initiator_keypair: &PqKeyPair,
+    responder_keypair: &PqKeyPair,
+) -> (PqHandshake, PqHandshake) {
     let mut initiator =
-        PqHandshake::new_initiator(initiator_kp, &responder_kp.public, prologue).unwrap();
-    let mut responder = PqHandshake::new_responder(responder_kp, prologue).unwrap();
+        PqHandshake::new_initiator(initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = PqHandshake::new_responder(responder_keypair, &[]).unwrap();
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload = vec![0u8; BUFFER_LEN];
 
-    // PQ msg1 can be ~4640+ bytes, msg2 ~3408+ bytes
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
-
-    // Message 1: initiator -> responder
-    assert_eq!(initiator.next_action(), HandshakeAction::WriteMessage);
-    let len = initiator.write_message(msg1_payload, &mut buf).unwrap();
-
-    assert_eq!(responder.next_action(), HandshakeAction::ReadMessage);
-    let plen = responder
-        .read_message(&buf[..len], &mut payload_buf)
+    let message_1_length = initiator.write_message(&[], &mut message).unwrap();
+    responder
+        .read_message(&message[..message_1_length], &mut payload)
         .unwrap();
-    assert_eq!(&payload_buf[..plen], msg1_payload);
 
-    // Message 2: responder -> initiator
-    assert_eq!(responder.next_action(), HandshakeAction::WriteMessage);
-    let len = responder.write_message(msg2_payload, &mut buf).unwrap();
-
-    assert_eq!(initiator.next_action(), HandshakeAction::ReadMessage);
-    let plen = initiator
-        .read_message(&buf[..len], &mut payload_buf)
+    let message_2_length = responder
+        .write_message(b"server payload", &mut message)
         .unwrap();
-    assert_eq!(&payload_buf[..plen], msg2_payload);
+    let server_payload_length = initiator
+        .read_message(&message[..message_2_length], &mut payload)
+        .unwrap();
+    assert_eq!(&payload[..server_payload_length], b"server payload");
 
-    // Both complete
+    let message_3_length = initiator
+        .write_message(b"client payload", &mut message)
+        .unwrap();
+    let client_payload_length = responder
+        .read_message(&message[..message_3_length], &mut payload)
+        .unwrap();
+    assert_eq!(&payload[..client_payload_length], b"client payload");
+
+    (initiator, responder)
+}
+
+fn complete_hybrid_handshake(
+    initiator_keypair: &HybridKeyPair,
+    responder_keypair: &HybridKeyPair,
+) -> (HybridHandshake, HybridHandshake) {
+    let mut initiator =
+        HybridHandshake::new_initiator(initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = HybridHandshake::new_responder(responder_keypair, &[]).unwrap();
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload = vec![0u8; BUFFER_LEN];
+
+    let message_1_length = initiator.write_message(&[], &mut message).unwrap();
+    responder
+        .read_message(&message[..message_1_length], &mut payload)
+        .unwrap();
+
+    let message_2_length = responder
+        .write_message(b"server payload", &mut message)
+        .unwrap();
+    let server_payload_length = initiator
+        .read_message(&message[..message_2_length], &mut payload)
+        .unwrap();
+    assert_eq!(&payload[..server_payload_length], b"server payload");
+
+    let message_3_length = initiator
+        .write_message(b"client payload", &mut message)
+        .unwrap();
+    let client_payload_length = responder
+        .read_message(&message[..message_3_length], &mut payload)
+        .unwrap();
+    assert_eq!(&payload[..client_payload_length], b"client payload");
+
+    (initiator, responder)
+}
+
+#[test]
+fn pq_three_flights_authenticate_before_exposing_identity() {
+    let initiator_keypair = PqKeyPair::generate(&mut OsRng);
+    let responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let mut initiator =
+        PqHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = PqHandshake::new_responder(&responder_keypair, &[]).unwrap();
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload = vec![0u8; BUFFER_LEN];
+
+    assert_eq!(initiator.next_message_overhead(), 3472);
+    assert!(!initiator.next_message_accepts_payload());
+    assert!(initiator.remote_public().is_none());
+    assert_eq!(
+        initiator.write_message(b"forbidden", &mut message),
+        Err(Error::WrongState),
+    );
+
+    let message_1_length = initiator.write_message(&[], &mut message).unwrap();
+    assert_eq!(message_1_length, 3472);
+    assert_eq!(
+        responder
+            .read_message(&message[..message_1_length], &mut payload)
+            .unwrap(),
+        0,
+    );
+    assert!(responder.remote_public().is_none());
+    assert!(!responder.is_remote_authenticated());
+    assert_eq!(responder.get_ask(b"test"), Err(Error::WrongState));
+
+    assert_eq!(responder.next_message_overhead(), 2208);
+    assert!(responder.next_message_accepts_payload());
+    let message_2_length = responder.write_message(b"server", &mut message).unwrap();
+    assert_eq!(message_2_length, 2208 + b"server".len());
+
+    let server_payload_length = initiator
+        .read_message(&message[..message_2_length], &mut payload)
+        .unwrap();
+    assert_eq!(&payload[..server_payload_length], b"server");
+    assert!(initiator.is_remote_authenticated());
+    assert_eq!(initiator.remote_public().unwrap(), responder_keypair.public);
+    assert_eq!(initiator.get_ask(b"test"), Err(Error::WrongState));
+
+    assert_eq!(initiator.next_message_overhead(), 16);
+    let message_3_length = initiator.write_message(b"client", &mut message).unwrap();
+    assert_eq!(message_3_length, 16 + b"client".len());
     assert_eq!(initiator.next_action(), HandshakeAction::Complete);
+
+    let client_payload_length = responder
+        .read_message(&message[..message_3_length], &mut payload)
+        .unwrap();
+    assert_eq!(&payload[..client_payload_length], b"client");
     assert_eq!(responder.next_action(), HandshakeAction::Complete);
-
-    let i_transport = initiator.into_transport().unwrap();
-    let r_transport = responder.into_transport().unwrap();
-    (i_transport, r_transport)
+    assert_eq!(responder.remote_public().unwrap(), initiator_keypair.public);
 }
 
-// ===========================================================================
-// 1. PQ round-trip with empty payloads
-// ===========================================================================
-
 #[test]
-fn pq_round_trip_empty() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
+fn hybrid_three_flights_authenticate_before_exposing_identity() {
+    let initiator_keypair = HybridKeyPair::generate(&mut OsRng);
+    let responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let mut initiator =
+        HybridHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = HybridHandshake::new_responder(&responder_keypair, &[]).unwrap();
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload = vec![0u8; BUFFER_LEN];
 
-    let (i_transport, r_transport) = pq_handshake_pair(&i_kp, &r_kp, &[], &[], &[]);
+    assert_eq!(initiator.next_message_overhead(), 3536);
+    assert!(!initiator.next_message_accepts_payload());
+    assert!(initiator.remote_public().is_none());
+    assert_eq!(
+        initiator.write_message(b"forbidden", &mut message),
+        Err(Error::WrongState),
+    );
 
-    // Both produced valid transport states
-    let _ = i_transport.handshake_hash();
-    let _ = r_transport.handshake_hash();
-}
+    let message_1_length = initiator.write_message(&[], &mut message).unwrap();
+    assert_eq!(message_1_length, 3536);
+    assert_eq!(
+        responder
+            .read_message(&message[..message_1_length], &mut payload)
+            .unwrap(),
+        0,
+    );
+    assert!(responder.remote_public().is_none());
+    assert!(!responder.is_remote_authenticated());
 
-// ===========================================================================
-// 2. PQ round-trip with payloads
-// ===========================================================================
+    assert_eq!(responder.next_message_overhead(), 2240);
+    let message_2_length = responder.write_message(b"server", &mut message).unwrap();
+    assert_eq!(message_2_length, 2240 + b"server".len());
 
-#[test]
-fn pq_round_trip_with_payloads() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
-
-    let msg1 = b"initiator handshake payload";
-    let msg2 = b"responder handshake payload";
-
-    let (_i_transport, _r_transport) = pq_handshake_pair(&i_kp, &r_kp, &[], msg1, msg2);
-}
-
-// ===========================================================================
-// 3. Transport messages after PQ handshake
-// ===========================================================================
-
-#[test]
-fn pq_transport_bidirectional() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
-
-    let (mut i_transport, mut r_transport) = pq_handshake_pair(&i_kp, &r_kp, &[], &[], &[]);
-
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
-
-    // Initiator -> Responder
-    let msg = b"from PQ initiator";
-    let len = i_transport.write_message(msg, &mut buf).unwrap();
-    let plen = r_transport
-        .read_message(&buf[..len], &mut payload_buf)
+    let server_payload_length = initiator
+        .read_message(&message[..message_2_length], &mut payload)
         .unwrap();
-    assert_eq!(&payload_buf[..plen], msg.as_slice());
+    assert_eq!(&payload[..server_payload_length], b"server");
+    assert_eq!(initiator.remote_public().unwrap(), responder_keypair.public);
 
-    // Responder -> Initiator
-    let msg = b"from PQ responder";
-    let len = r_transport.write_message(msg, &mut buf).unwrap();
-    let plen = i_transport
-        .read_message(&buf[..len], &mut payload_buf)
+    assert_eq!(initiator.next_message_overhead(), 16);
+    let message_3_length = initiator.write_message(b"client", &mut message).unwrap();
+    let client_payload_length = responder
+        .read_message(&message[..message_3_length], &mut payload)
         .unwrap();
-    assert_eq!(&payload_buf[..plen], msg.as_slice());
+    assert_eq!(&payload[..client_payload_length], b"client");
+    assert_eq!(responder.remote_public().unwrap(), initiator_keypair.public);
+}
 
-    // Multiple interleaved rounds
-    for i in 0..10 {
-        let msg_i = format!("pq-init-{}", i);
-        let len = i_transport
-            .write_message(msg_i.as_bytes(), &mut buf)
-            .unwrap();
-        let plen = r_transport
-            .read_message(&buf[..len], &mut payload_buf)
-            .unwrap();
-        assert_eq!(&payload_buf[..plen], msg_i.as_bytes());
+#[test]
+fn pq_transcript_ask_and_transport_match() {
+    let initiator_keypair = PqKeyPair::generate(&mut OsRng);
+    let responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let (initiator, responder) = complete_pq_handshake(&initiator_keypair, &responder_keypair);
 
-        let msg_r = format!("pq-resp-{}", i);
-        let len = r_transport
-            .write_message(msg_r.as_bytes(), &mut buf)
-            .unwrap();
-        let plen = i_transport
-            .read_message(&buf[..len], &mut payload_buf)
-            .unwrap();
-        assert_eq!(&payload_buf[..plen], msg_r.as_bytes());
+    assert_eq!(
+        initiator.handshake_hash().unwrap(),
+        responder.handshake_hash().unwrap(),
+    );
+    assert_eq!(
+        initiator.get_ask(b"label").unwrap(),
+        responder.get_ask(b"label").unwrap(),
+    );
+
+    let mut initiator_transport = initiator.into_transport().unwrap();
+    let mut responder_transport = responder.into_transport().unwrap();
+    let mut ciphertext = [0u8; 128];
+    let mut plaintext = [0u8; 128];
+    let ciphertext_length = initiator_transport
+        .write_message(b"transport", &mut ciphertext)
+        .unwrap();
+    let plaintext_length = responder_transport
+        .read_message(&ciphertext[..ciphertext_length], &mut plaintext)
+        .unwrap();
+
+    assert_eq!(&plaintext[..plaintext_length], b"transport");
+}
+
+#[test]
+fn hybrid_transcript_ask_and_transport_match() {
+    let initiator_keypair = HybridKeyPair::generate(&mut OsRng);
+    let responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let (initiator, responder) = complete_hybrid_handshake(&initiator_keypair, &responder_keypair);
+
+    assert_eq!(
+        initiator.handshake_hash().unwrap(),
+        responder.handshake_hash().unwrap(),
+    );
+    assert_eq!(
+        initiator.get_ask(b"label").unwrap(),
+        responder.get_ask(b"label").unwrap(),
+    );
+
+    let mut initiator_transport = initiator.into_transport().unwrap();
+    let mut responder_transport = responder.into_transport().unwrap();
+    let mut ciphertext = [0u8; 128];
+    let mut plaintext = [0u8; 128];
+    let ciphertext_length = responder_transport
+        .write_message(b"transport", &mut ciphertext)
+        .unwrap();
+    let plaintext_length = initiator_transport
+        .read_message(&ciphertext[..ciphertext_length], &mut plaintext)
+        .unwrap();
+
+    assert_eq!(&plaintext[..plaintext_length], b"transport");
+}
+
+#[test]
+fn pq_rejects_truncation_tampering_and_wrong_key() {
+    let initiator_keypair = PqKeyPair::generate(&mut OsRng);
+    let responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let wrong_responder = PqKeyPair::generate(&mut OsRng);
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload = vec![0u8; BUFFER_LEN];
+
+    let mut wrong_initiator =
+        PqHandshake::new_initiator(&initiator_keypair, &wrong_responder.public, &[]).unwrap();
+    let mut responder = PqHandshake::new_responder(&responder_keypair, &[]).unwrap();
+    let message_length = wrong_initiator.write_message(&[], &mut message).unwrap();
+    assert!(
+        responder
+            .read_message(&message[..message_length], &mut payload)
+            .is_err(),
+    );
+
+    let mut initiator =
+        PqHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let message_length = initiator.write_message(&[], &mut message).unwrap();
+    let original_message = message[..message_length].to_vec();
+
+    for truncated_length in [0, 1, 1088, 3471] {
+        let mut fresh_responder = PqHandshake::new_responder(&responder_keypair, &[]).unwrap();
+        assert!(
+            fresh_responder
+                .read_message(&original_message[..truncated_length], &mut payload)
+                .is_err(),
+        );
     }
+
+    let mut tampered_message = original_message;
+    tampered_message[1200] ^= 1;
+    let mut fresh_responder = PqHandshake::new_responder(&responder_keypair, &[]).unwrap();
+    assert!(
+        fresh_responder
+            .read_message(&tampered_message, &mut payload)
+            .is_err(),
+    );
 }
 
-// ===========================================================================
-// 4. Handshake hashes match on both sides
-// ===========================================================================
+#[test]
+fn hybrid_rejects_truncation_tampering_and_wrong_key() {
+    let initiator_keypair = HybridKeyPair::generate(&mut OsRng);
+    let responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let wrong_responder = HybridKeyPair::generate(&mut OsRng);
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload = vec![0u8; BUFFER_LEN];
+
+    let mut wrong_initiator =
+        HybridHandshake::new_initiator(&initiator_keypair, &wrong_responder.public, &[]).unwrap();
+    let mut responder = HybridHandshake::new_responder(&responder_keypair, &[]).unwrap();
+    let message_length = wrong_initiator.write_message(&[], &mut message).unwrap();
+    assert!(
+        responder
+            .read_message(&message[..message_length], &mut payload)
+            .is_err(),
+    );
+
+    let mut initiator =
+        HybridHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let message_length = initiator.write_message(&[], &mut message).unwrap();
+    let original_message = message[..message_length].to_vec();
+
+    for truncated_length in [0, 1, 1088, 3535] {
+        let mut fresh_responder = HybridHandshake::new_responder(&responder_keypair, &[]).unwrap();
+        assert!(
+            fresh_responder
+                .read_message(&original_message[..truncated_length], &mut payload)
+                .is_err(),
+        );
+    }
+
+    let mut tampered_message = original_message;
+    tampered_message[1400] ^= 1;
+    let mut fresh_responder = HybridHandshake::new_responder(&responder_keypair, &[]).unwrap();
+    assert!(
+        fresh_responder
+            .read_message(&tampered_message, &mut payload)
+            .is_err(),
+    );
+}
 
 #[test]
-fn pq_handshake_hash_matches() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
+fn pq_rejects_truncated_messages_2_and_3() {
+    let initiator_keypair = PqKeyPair::generate(&mut OsRng);
+    let responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload = vec![0u8; BUFFER_LEN];
 
-    let mut initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-    let mut responder = PqHandshake::new_responder(&r_kp, &[]).unwrap();
+    let mut initiator =
+        PqHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = PqHandshake::new_responder(&responder_keypair, &[]).unwrap();
 
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
-
-    let len = initiator.write_message(&[], &mut buf).unwrap();
+    let message_1_length = initiator.write_message(&[], &mut message).unwrap();
     responder
-        .read_message(&buf[..len], &mut payload_buf)
-        .unwrap();
-    let len = responder.write_message(&[], &mut buf).unwrap();
-    initiator
-        .read_message(&buf[..len], &mut payload_buf)
+        .read_message(&message[..message_1_length], &mut payload)
         .unwrap();
 
-    let i_hash = *initiator.handshake_hash().unwrap();
-    let r_hash = *responder.handshake_hash().unwrap();
-    assert_eq!(i_hash, r_hash, "PQ handshake hashes must match");
-
-    let i_transport = initiator.into_transport().unwrap();
-    let r_transport = responder.into_transport().unwrap();
-    assert_eq!(
-        i_transport.handshake_hash(),
-        r_transport.handshake_hash(),
-        "PQ transport handshake hashes must match"
+    let message_2_length = responder.write_message(&[], &mut message).unwrap();
+    assert!(
+        initiator
+            .read_message(&message[..message_2_length - 1], &mut payload)
+            .is_err(),
     );
-    assert_eq!(
-        *i_transport.handshake_hash(),
-        i_hash,
-        "Transport hash must equal pre-transport hash"
-    );
-}
 
-// ===========================================================================
-// 5. ASK derivation matches on both sides
-// ===========================================================================
+    let mut initiator =
+        PqHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = PqHandshake::new_responder(&responder_keypair, &[]).unwrap();
 
-#[test]
-fn pq_ask_derivation_matches() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
-
-    let mut initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-    let mut responder = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
-
-    let len = initiator.write_message(&[], &mut buf).unwrap();
+    let message_1_length = initiator.write_message(&[], &mut message).unwrap();
     responder
-        .read_message(&buf[..len], &mut payload_buf)
+        .read_message(&message[..message_1_length], &mut payload)
         .unwrap();
-    let len = responder.write_message(&[], &mut buf).unwrap();
+
+    let message_2_length = responder.write_message(&[], &mut message).unwrap();
     initiator
-        .read_message(&buf[..len], &mut payload_buf)
+        .read_message(&message[..message_2_length], &mut payload)
         .unwrap();
 
-    let i_ask = initiator.get_ask(b"test-label").unwrap();
-    let r_ask = responder.get_ask(b"test-label").unwrap();
-    assert_eq!(i_ask, r_ask, "ASK values must match for both sides");
-
-    // Different labels produce different ASKs
-    let i_ask2 = initiator.get_ask(b"other-label").unwrap();
-    assert_ne!(
-        i_ask, i_ask2,
-        "Different labels must produce different ASK values"
+    let message_3_length = initiator.write_message(&[], &mut message).unwrap();
+    assert!(
+        responder
+            .read_message(&message[..message_3_length - 1], &mut payload)
+            .is_err(),
     );
 }
 
 #[test]
-fn pq_ask_before_complete_fails() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
+fn hybrid_rejects_truncated_messages_2_and_3() {
+    let initiator_keypair = HybridKeyPair::generate(&mut OsRng);
+    let responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload = vec![0u8; BUFFER_LEN];
 
-    let initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-    assert_eq!(initiator.get_ask(b"label"), Err(Error::WrongState));
+    let mut initiator =
+        HybridHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = HybridHandshake::new_responder(&responder_keypair, &[]).unwrap();
 
-    let responder = PqHandshake::new_responder(&r_kp, &[]).unwrap();
+    let message_1_length = initiator.write_message(&[], &mut message).unwrap();
+    responder
+        .read_message(&message[..message_1_length], &mut payload)
+        .unwrap();
+
+    let message_2_length = responder.write_message(&[], &mut message).unwrap();
+    assert!(
+        initiator
+            .read_message(&message[..message_2_length - 1], &mut payload)
+            .is_err(),
+    );
+
+    let mut initiator =
+        HybridHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = HybridHandshake::new_responder(&responder_keypair, &[]).unwrap();
+
+    let message_1_length = initiator.write_message(&[], &mut message).unwrap();
+    responder
+        .read_message(&message[..message_1_length], &mut payload)
+        .unwrap();
+
+    let message_2_length = responder.write_message(&[], &mut message).unwrap();
+    initiator
+        .read_message(&message[..message_2_length], &mut payload)
+        .unwrap();
+
+    let message_3_length = initiator.write_message(&[], &mut message).unwrap();
+    assert!(
+        responder
+            .read_message(&message[..message_3_length - 1], &mut payload)
+            .is_err(),
+    );
+}
+
+#[test]
+fn pq_message_3_tampering_never_authenticates_responder_view() {
+    let initiator_keypair = PqKeyPair::generate(&mut OsRng);
+    let responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let mut initiator =
+        PqHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = PqHandshake::new_responder(&responder_keypair, &[]).unwrap();
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload = vec![0u8; BUFFER_LEN];
+
+    let message_1_length = initiator.write_message(&[], &mut message).unwrap();
+    responder
+        .read_message(&message[..message_1_length], &mut payload)
+        .unwrap();
+    let message_2_length = responder.write_message(&[], &mut message).unwrap();
+    initiator
+        .read_message(&message[..message_2_length], &mut payload)
+        .unwrap();
+    let message_3_length = initiator.write_message(&[], &mut message).unwrap();
+    message[0] ^= 1;
+
+    assert!(
+        responder
+            .read_message(&message[..message_3_length], &mut payload)
+            .is_err(),
+    );
+    assert!(!responder.is_remote_authenticated());
+    assert!(responder.remote_public().is_none());
     assert_eq!(responder.get_ask(b"label"), Err(Error::WrongState));
 }
 
-// ===========================================================================
-// 6. Prologue mismatch fails
-// ===========================================================================
-
 #[test]
-fn pq_prologue_mismatch_fails() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
+fn hybrid_message_3_tampering_never_authenticates_responder_view() {
+    let initiator_keypair = HybridKeyPair::generate(&mut OsRng);
+    let responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let mut initiator =
+        HybridHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = HybridHandshake::new_responder(&responder_keypair, &[]).unwrap();
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload = vec![0u8; BUFFER_LEN];
 
-    let mut initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, b"prologue-A").unwrap();
-    let mut responder = PqHandshake::new_responder(&r_kp, b"prologue-B").unwrap();
-
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
-
-    let len = initiator.write_message(&[], &mut buf).unwrap();
-    let result = responder.read_message(&buf[..len], &mut payload_buf);
-    assert!(
-        result.is_err(),
-        "Mismatched prologue should cause PQ handshake failure"
-    );
-}
-
-// ===========================================================================
-// 7. Wrong remote PQ key fails
-// ===========================================================================
-
-#[test]
-fn pq_wrong_remote_key_fails() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
-    let wrong_kp = PqKeyPair::generate(&mut OsRng);
-
-    // Initiator uses wrong responder key
-    let mut initiator = PqHandshake::new_initiator(&i_kp, &wrong_kp.public, &[]).unwrap();
-    let mut responder = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
-
-    let len = initiator.write_message(&[], &mut buf).unwrap();
-    let result = responder.read_message(&buf[..len], &mut payload_buf);
-    assert!(
-        result.is_err(),
-        "Wrong remote PQ key should cause handshake failure"
-    );
-}
-
-// ===========================================================================
-// 8. Truncated messages fail
-// ===========================================================================
-
-#[test]
-fn pq_truncated_msg1_fails() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
-
-    let mut initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
-
-    let len = initiator.write_message(&[], &mut buf).unwrap();
-
-    for truncated_len in [0, 1, 32, 1216, 2304, 3536, len - 1] {
-        if truncated_len >= len {
-            continue;
-        }
-        let mut fresh_responder = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-        let result = fresh_responder.read_message(&buf[..truncated_len], &mut payload_buf);
-        assert!(
-            result.is_err(),
-            "Truncated PQ msg1 at {} bytes (full={}) should fail",
-            truncated_len,
-            len
-        );
-    }
-}
-
-#[test]
-fn pq_truncated_msg2_fails() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
-
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
-
-    for truncated_len in [0, 1, 32, 1216, 2304, 3392] {
-        let mut fresh_i = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-        let mut fresh_r = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-
-        let l1 = fresh_i.write_message(&[], &mut buf).unwrap();
-        fresh_r.read_message(&buf[..l1], &mut payload_buf).unwrap();
-        let l2 = fresh_r.write_message(&[], &mut buf).unwrap();
-
-        if truncated_len >= l2 {
-            continue;
-        }
-
-        let result = fresh_i.read_message(&buf[..truncated_len], &mut payload_buf);
-        assert!(
-            result.is_err(),
-            "Truncated PQ msg2 at {} bytes (full={}) should fail",
-            truncated_len,
-            l2
-        );
-    }
-
-    // Also truncation at len-1
-    {
-        let mut fresh_i = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-        let mut fresh_r = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-
-        let l1 = fresh_i.write_message(&[], &mut buf).unwrap();
-        fresh_r.read_message(&buf[..l1], &mut payload_buf).unwrap();
-        let l2 = fresh_r.write_message(&[], &mut buf).unwrap();
-
-        let result = fresh_i.read_message(&buf[..l2 - 1], &mut payload_buf);
-        assert!(
-            result.is_err(),
-            "Truncated PQ msg2 at {} bytes (full={}) should fail",
-            l2 - 1,
-            l2
-        );
-    }
-}
-
-// ===========================================================================
-// 9. Wrong-state errors
-// ===========================================================================
-
-#[test]
-fn pq_wrong_state_errors() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
-
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
-
-    // Initiator: first action is Write, so read should fail
-    {
-        let mut initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-        assert_eq!(initiator.next_action(), HandshakeAction::WriteMessage);
-        let result = initiator.read_message(&[0u8; 4640], &mut payload_buf);
-        assert_eq!(result, Err(Error::WrongState));
-    }
-
-    // Responder: first action is Read, so write should fail
-    {
-        let mut responder = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-        assert_eq!(responder.next_action(), HandshakeAction::ReadMessage);
-        let result = responder.write_message(&[], &mut buf);
-        assert_eq!(result, Err(Error::WrongState));
-    }
-
-    // After msg1, initiator should read (not write)
-    {
-        let mut initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-        initiator.write_message(&[], &mut buf).unwrap();
-        assert_eq!(initiator.next_action(), HandshakeAction::ReadMessage);
-        let result = initiator.write_message(&[], &mut buf);
-        assert_eq!(result, Err(Error::WrongState));
-    }
-
-    // After msg1, responder should write (not read)
-    {
-        let mut initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-        let mut responder = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-
-        let len = initiator.write_message(&[], &mut buf).unwrap();
-        responder
-            .read_message(&buf[..len], &mut payload_buf)
-            .unwrap();
-        assert_eq!(responder.next_action(), HandshakeAction::WriteMessage);
-        let result = responder.read_message(&[0u8; 3408], &mut payload_buf);
-        assert_eq!(result, Err(Error::WrongState));
-    }
-
-    // After handshake complete, both write and read should fail
-    {
-        let mut initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-        let mut responder = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-
-        let len = initiator.write_message(&[], &mut buf).unwrap();
-        responder
-            .read_message(&buf[..len], &mut payload_buf)
-            .unwrap();
-        let len = responder.write_message(&[], &mut buf).unwrap();
-        initiator
-            .read_message(&buf[..len], &mut payload_buf)
-            .unwrap();
-
-        assert_eq!(initiator.next_action(), HandshakeAction::Complete);
-        assert_eq!(
-            initiator.write_message(&[], &mut buf),
-            Err(Error::WrongState)
-        );
-        assert_eq!(
-            initiator.read_message(&[0u8; 3408], &mut payload_buf),
-            Err(Error::WrongState)
-        );
-
-        assert_eq!(responder.next_action(), HandshakeAction::Complete);
-        assert_eq!(
-            responder.write_message(&[], &mut buf),
-            Err(Error::WrongState)
-        );
-        assert_eq!(
-            responder.read_message(&[0u8; 4640], &mut payload_buf),
-            Err(Error::WrongState)
-        );
-    }
-}
-
-// ===========================================================================
-// 10. Message overhead is correct
-// ===========================================================================
-
-#[test]
-fn pq_message_overhead_correct() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
-
-    let initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-    assert_eq!(initiator.next_message_overhead(), 4640);
-
-    let responder = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-    assert_eq!(responder.next_message_overhead(), 0); // responder reads first
-}
-
-#[test]
-fn pq_msg2_overhead_correct() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
-
-    let mut initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-    let mut responder = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
-
-    let len = initiator.write_message(&[], &mut buf).unwrap();
+    let message_1_length = initiator.write_message(&[], &mut message).unwrap();
     responder
-        .read_message(&buf[..len], &mut payload_buf)
+        .read_message(&message[..message_1_length], &mut payload)
         .unwrap();
-
-    assert_eq!(responder.next_message_overhead(), 3408);
-}
-
-// ===========================================================================
-// 11. Written message sizes match overhead + payload
-// ===========================================================================
-
-#[test]
-fn pq_message_sizes_match_overhead() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
-
-    let mut initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-    let mut responder = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
-
-    // Msg1 with empty payload
-    let overhead1 = initiator.next_message_overhead();
-    let len1 = initiator.write_message(&[], &mut buf).unwrap();
-    assert_eq!(
-        len1, overhead1,
-        "msg1 with empty payload should equal overhead"
-    );
-
-    responder
-        .read_message(&buf[..len1], &mut payload_buf)
+    let message_2_length = responder.write_message(&[], &mut message).unwrap();
+    initiator
+        .read_message(&message[..message_2_length], &mut payload)
         .unwrap();
+    let message_3_length = initiator.write_message(&[], &mut message).unwrap();
+    message[0] ^= 1;
 
-    // Msg2 with empty payload
-    let overhead2 = responder.next_message_overhead();
-    let len2 = responder.write_message(&[], &mut buf).unwrap();
-    assert_eq!(
-        len2, overhead2,
-        "msg2 with empty payload should equal overhead"
-    );
-
-    // Now test with payloads
-    let mut initiator2 = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-    let mut responder2 = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-
-    let payload = b"test payload data";
-    let overhead1 = initiator2.next_message_overhead();
-    let len1 = initiator2.write_message(payload, &mut buf).unwrap();
-    assert_eq!(
-        len1,
-        overhead1 + payload.len(),
-        "msg1 size should be overhead + payload"
-    );
-
-    responder2
-        .read_message(&buf[..len1], &mut payload_buf)
-        .unwrap();
-
-    let payload2 = b"response payload";
-    let overhead2 = responder2.next_message_overhead();
-    let len2 = responder2.write_message(payload2, &mut buf).unwrap();
-    assert_eq!(
-        len2,
-        overhead2 + payload2.len(),
-        "msg2 size should be overhead + payload"
-    );
-}
-
-// ===========================================================================
-// 12. Transport rekey after PQ handshake
-// ===========================================================================
-
-#[test]
-fn pq_transport_rekey() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
-
-    let (mut i_transport, mut r_transport) = pq_handshake_pair(&i_kp, &r_kp, &[], &[], &[]);
-
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
-
-    // Send before rekey
-    let msg = b"before rekey";
-    let len = i_transport.write_message(msg, &mut buf).unwrap();
-    let plen = r_transport
-        .read_message(&buf[..len], &mut payload_buf)
-        .unwrap();
-    assert_eq!(&payload_buf[..plen], msg.as_slice());
-
-    // Rekey initiator->responder direction
-    i_transport.rekey_send().unwrap();
-    r_transport.rekey_recv().unwrap();
-
-    let msg = b"after rekey i->r";
-    let len = i_transport.write_message(msg, &mut buf).unwrap();
-    let plen = r_transport
-        .read_message(&buf[..len], &mut payload_buf)
-        .unwrap();
-    assert_eq!(&payload_buf[..plen], msg.as_slice());
-
-    // Other direction still works (not yet rekeyed)
-    let msg = b"before rekey r->i";
-    let len = r_transport.write_message(msg, &mut buf).unwrap();
-    let plen = i_transport
-        .read_message(&buf[..len], &mut payload_buf)
-        .unwrap();
-    assert_eq!(&payload_buf[..plen], msg.as_slice());
-
-    // Rekey responder->initiator direction
-    r_transport.rekey_send().unwrap();
-    i_transport.rekey_recv().unwrap();
-
-    let msg = b"after rekey r->i";
-    let len = r_transport.write_message(msg, &mut buf).unwrap();
-    let plen = i_transport
-        .read_message(&buf[..len], &mut payload_buf)
-        .unwrap();
-    assert_eq!(&payload_buf[..plen], msg.as_slice());
-
-    // Mismatched rekey should fail
-    i_transport.rekey_send().unwrap();
-    // Intentionally NOT rekeying r_transport.rekey_recv()
-    let msg = b"this should fail";
-    let len = i_transport.write_message(msg, &mut buf).unwrap();
-    let result = r_transport.read_message(&buf[..len], &mut payload_buf);
     assert!(
-        result.is_err(),
-        "Mismatched rekey should cause decryption failure"
+        responder
+            .read_message(&message[..message_3_length], &mut payload)
+            .is_err(),
     );
+    assert!(!responder.is_remote_authenticated());
+    assert!(responder.remote_public().is_none());
 }
 
-// ===========================================================================
-// 13. Remote public key recovery
-// ===========================================================================
-
 #[test]
-fn pq_remote_public_key_recovery() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
+fn forged_pq_identity_without_victim_secret_fails_confirmation() {
+    let attacker = PqKeyPair::generate(&mut OsRng);
+    let victim = PqKeyPair::generate(&mut OsRng);
+    let responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let victim_public = victim.public.clone();
+    let forged_keypair = PqKeyPair {
+        secret: attacker.secret,
+        public: victim_public,
+    };
+    let mut attacker_handshake =
+        PqHandshake::new_initiator(&forged_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = PqHandshake::new_responder(&responder_keypair, &[]).unwrap();
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload = vec![0u8; BUFFER_LEN];
 
-    let mut initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
-    let mut responder = PqHandshake::new_responder(&r_kp, &[]).unwrap();
-
-    // Responder doesn't know initiator's key yet
+    let message_1_length = attacker_handshake.write_message(&[], &mut message).unwrap();
+    responder
+        .read_message(&message[..message_1_length], &mut payload)
+        .unwrap();
     assert!(responder.remote_public().is_none());
 
-    let mut buf = vec![0u8; 65535];
-    let mut payload_buf = vec![0u8; 65535];
+    let message_2_length = responder.write_message(&[], &mut message).unwrap();
+    assert!(
+        attacker_handshake
+            .read_message(&message[..message_2_length], &mut payload)
+            .is_err(),
+    );
+    assert!(responder.read_message(&[0u8; 16], &mut payload).is_err(),);
+    assert!(responder.remote_public().is_none());
+    assert_eq!(responder.get_ask(b"label"), Err(Error::WrongState));
+}
 
-    let len = initiator.write_message(&[], &mut buf).unwrap();
+#[test]
+fn forged_hybrid_identity_without_victim_secret_fails_confirmation() {
+    let attacker = HybridKeyPair::generate(&mut OsRng);
+    let victim = HybridKeyPair::generate(&mut OsRng);
+    let responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let forged_keypair = HybridKeyPair {
+        secret: attacker.secret,
+        public: victim.public.clone(),
+    };
+    let mut attacker_handshake =
+        HybridHandshake::new_initiator(&forged_keypair, &responder_keypair.public, &[]).unwrap();
+    let mut responder = HybridHandshake::new_responder(&responder_keypair, &[]).unwrap();
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload = vec![0u8; BUFFER_LEN];
+
+    let message_1_length = attacker_handshake.write_message(&[], &mut message).unwrap();
     responder
-        .read_message(&buf[..len], &mut payload_buf)
+        .read_message(&message[..message_1_length], &mut payload)
+        .unwrap();
+    assert!(responder.remote_public().is_none());
+
+    let message_2_length = responder.write_message(&[], &mut message).unwrap();
+    assert!(
+        attacker_handshake
+            .read_message(&message[..message_2_length], &mut payload)
+            .is_err(),
+    );
+    assert!(responder.read_message(&[0u8; 16], &mut payload).is_err(),);
+    assert!(responder.remote_public().is_none());
+}
+
+#[test]
+fn pq_and_hybrid_writers_enforce_message_limit() {
+    const OVERSIZED_BUFFER_LEN: usize = BUFFER_LEN + 1;
+    const PQ_MESSAGE_2_OVERHEAD: usize = 2208;
+    const HYBRID_MESSAGE_2_OVERHEAD: usize = 2240;
+    const MESSAGE_3_OVERHEAD: usize = 16;
+
+    let mut message = vec![0u8; OVERSIZED_BUFFER_LEN];
+    let mut payload_output = vec![0u8; BUFFER_LEN];
+
+    let pq_initiator_keypair = PqKeyPair::generate(&mut OsRng);
+    let pq_responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let mut pq_initiator =
+        PqHandshake::new_initiator(&pq_initiator_keypair, &pq_responder_keypair.public, &[])
+            .unwrap();
+    let mut pq_responder = PqHandshake::new_responder(&pq_responder_keypair, &[]).unwrap();
+
+    let message_1_len = pq_initiator.write_message(&[], &mut message).unwrap();
+    pq_responder
+        .read_message(&message[..message_1_len], &mut payload_output)
         .unwrap();
 
-    // Responder now knows the initiator's static hybrid key
-    let recovered = responder.remote_public().unwrap();
+    let oversized_message_2_payload = vec![0u8; OVERSIZED_BUFFER_LEN - PQ_MESSAGE_2_OVERHEAD];
+
     assert_eq!(
-        recovered.dh_public().as_bytes(),
-        i_kp.public.dh_public().as_bytes(),
-        "Recovered DH public key must match"
+        pq_responder.write_message(&oversized_message_2_payload, &mut message),
+        Err(Error::BadMessage),
+    );
+    assert_eq!(pq_responder.next_action(), HandshakeAction::WriteMessage);
+
+    let exact_message_2_payload = vec![0u8; BUFFER_LEN - PQ_MESSAGE_2_OVERHEAD];
+    let message_2_len = pq_responder
+        .write_message(&exact_message_2_payload, &mut message)
+        .unwrap();
+
+    assert_eq!(message_2_len, BUFFER_LEN);
+    assert_eq!(
+        pq_initiator
+            .read_message(&message[..message_2_len], &mut payload_output)
+            .unwrap(),
+        exact_message_2_payload.len(),
+    );
+
+    let oversized_message_3_payload = vec![0u8; OVERSIZED_BUFFER_LEN - MESSAGE_3_OVERHEAD];
+
+    assert_eq!(
+        pq_initiator.write_message(&oversized_message_3_payload, &mut message),
+        Err(Error::BadMessage),
+    );
+    assert_eq!(pq_initiator.next_action(), HandshakeAction::WriteMessage);
+
+    let exact_message_3_payload = vec![0u8; BUFFER_LEN - MESSAGE_3_OVERHEAD];
+
+    assert_eq!(
+        pq_initiator
+            .write_message(&exact_message_3_payload, &mut message)
+            .unwrap(),
+        BUFFER_LEN,
+    );
+
+    let hybrid_initiator_keypair = HybridKeyPair::generate(&mut OsRng);
+    let hybrid_responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let mut hybrid_initiator = HybridHandshake::new_initiator(
+        &hybrid_initiator_keypair,
+        &hybrid_responder_keypair.public,
+        &[],
+    )
+    .unwrap();
+    let mut hybrid_responder =
+        HybridHandshake::new_responder(&hybrid_responder_keypair, &[]).unwrap();
+
+    let message_1_len = hybrid_initiator.write_message(&[], &mut message).unwrap();
+    hybrid_responder
+        .read_message(&message[..message_1_len], &mut payload_output)
+        .unwrap();
+
+    let oversized_message_2_payload = vec![0u8; OVERSIZED_BUFFER_LEN - HYBRID_MESSAGE_2_OVERHEAD];
+
+    assert_eq!(
+        hybrid_responder.write_message(&oversized_message_2_payload, &mut message),
+        Err(Error::BadMessage),
     );
     assert_eq!(
-        recovered.kem_ek(),
-        i_kp.public.kem_ek(),
-        "Recovered KEM encapsulation key must match"
+        hybrid_responder.next_action(),
+        HandshakeAction::WriteMessage,
+    );
+
+    let exact_message_2_payload = vec![0u8; BUFFER_LEN - HYBRID_MESSAGE_2_OVERHEAD];
+    let message_2_len = hybrid_responder
+        .write_message(&exact_message_2_payload, &mut message)
+        .unwrap();
+
+    assert_eq!(message_2_len, BUFFER_LEN);
+    assert_eq!(
+        hybrid_initiator
+            .read_message(&message[..message_2_len], &mut payload_output)
+            .unwrap(),
+        exact_message_2_payload.len(),
+    );
+
+    assert_eq!(
+        hybrid_initiator.write_message(&oversized_message_3_payload, &mut message),
+        Err(Error::BadMessage),
+    );
+    assert_eq!(
+        hybrid_initiator.next_action(),
+        HandshakeAction::WriteMessage,
+    );
+
+    assert_eq!(
+        hybrid_initiator
+            .write_message(&exact_message_3_payload, &mut message)
+            .unwrap(),
+        BUFFER_LEN,
     );
 }
 
-// ===========================================================================
-// 14. PqPublicKey serialization round-trip
-// ===========================================================================
-
 #[test]
-fn pq_public_key_serialization() {
-    let kp = PqKeyPair::generate(&mut OsRng);
+fn pq_and_hybrid_payload_buffer_errors_are_retryable() {
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload_output = vec![0u8; BUFFER_LEN];
+    let responder_payload = b"responder payload";
 
-    let bytes = kp.public.to_bytes();
-    assert_eq!(bytes.len(), 1216);
+    let pq_initiator_keypair = PqKeyPair::generate(&mut OsRng);
+    let pq_responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let mut pq_initiator =
+        PqHandshake::new_initiator(&pq_initiator_keypair, &pq_responder_keypair.public, &[])
+            .unwrap();
+    let mut pq_responder = PqHandshake::new_responder(&pq_responder_keypair, &[]).unwrap();
 
-    let recovered = reishi_handshake::PqPublicKey::from_bytes(bytes);
+    let message_1_length = pq_initiator.write_message(&[], &mut message).unwrap();
+    pq_responder
+        .read_message(&message[..message_1_length], &mut payload_output)
+        .unwrap();
+
+    let message_2_length = pq_responder
+        .write_message(responder_payload, &mut message)
+        .unwrap();
+
     assert_eq!(
-        recovered.dh_public().as_bytes(),
-        kp.public.dh_public().as_bytes()
+        pq_initiator.read_message(&message[..message_2_length], &mut []),
+        Err(Error::BufferTooSmall),
     );
-    assert_eq!(recovered.kem_ek(), kp.public.kem_ek());
+    assert_eq!(pq_initiator.next_action(), HandshakeAction::ReadMessage);
+
+    let payload_length = pq_initiator
+        .read_message(&message[..message_2_length], &mut payload_output)
+        .unwrap();
+    assert_eq!(&payload_output[..payload_length], responder_payload);
+
+    let message_3_length = pq_initiator.write_message(&[], &mut message).unwrap();
+    pq_responder
+        .read_message(&message[..message_3_length], &mut payload_output)
+        .unwrap();
+    assert_eq!(
+        pq_initiator.handshake_hash().unwrap(),
+        pq_responder.handshake_hash().unwrap(),
+    );
+
+    let hybrid_initiator_keypair = HybridKeyPair::generate(&mut OsRng);
+    let hybrid_responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let mut hybrid_initiator = HybridHandshake::new_initiator(
+        &hybrid_initiator_keypair,
+        &hybrid_responder_keypair.public,
+        &[],
+    )
+    .unwrap();
+    let mut hybrid_responder =
+        HybridHandshake::new_responder(&hybrid_responder_keypair, &[]).unwrap();
+
+    let message_1_length = hybrid_initiator.write_message(&[], &mut message).unwrap();
+    hybrid_responder
+        .read_message(&message[..message_1_length], &mut payload_output)
+        .unwrap();
+
+    let message_2_length = hybrid_responder
+        .write_message(responder_payload, &mut message)
+        .unwrap();
+
+    assert_eq!(
+        hybrid_initiator.read_message(&message[..message_2_length], &mut []),
+        Err(Error::BufferTooSmall),
+    );
+    assert_eq!(hybrid_initiator.next_action(), HandshakeAction::ReadMessage,);
+
+    let payload_length = hybrid_initiator
+        .read_message(&message[..message_2_length], &mut payload_output)
+        .unwrap();
+    assert_eq!(&payload_output[..payload_length], responder_payload);
+
+    let message_3_length = hybrid_initiator.write_message(&[], &mut message).unwrap();
+    hybrid_responder
+        .read_message(&message[..message_3_length], &mut payload_output)
+        .unwrap();
+    assert_eq!(
+        hybrid_initiator.handshake_hash().unwrap(),
+        hybrid_responder.handshake_hash().unwrap(),
+    );
 }
 
-// ===========================================================================
-// 15. Buffer too small for write
-// ===========================================================================
+#[test]
+fn pq_and_hybrid_reject_cross_suite_message_splices() {
+    let pq_initiator_keypair = PqKeyPair::generate(&mut OsRng);
+    let pq_responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let mut pq_initiator =
+        PqHandshake::new_initiator(&pq_initiator_keypair, &pq_responder_keypair.public, &[])
+            .unwrap();
+    let mut pq_responder = PqHandshake::new_responder(&pq_responder_keypair, &[]).unwrap();
+
+    let hybrid_initiator_keypair = HybridKeyPair::generate(&mut OsRng);
+    let hybrid_responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let mut hybrid_initiator = HybridHandshake::new_initiator(
+        &hybrid_initiator_keypair,
+        &hybrid_responder_keypair.public,
+        &[],
+    )
+    .unwrap();
+    let mut hybrid_responder =
+        HybridHandshake::new_responder(&hybrid_responder_keypair, &[]).unwrap();
+
+    let mut message = vec![0u8; BUFFER_LEN];
+    let mut payload_output = vec![0u8; BUFFER_LEN];
+    let pq_message_1_len = pq_initiator.write_message(&[], &mut message).unwrap();
+    let pq_message_1 = message[..pq_message_1_len].to_vec();
+    let hybrid_message_1_len = hybrid_initiator.write_message(&[], &mut message).unwrap();
+    let hybrid_message_1 = message[..hybrid_message_1_len].to_vec();
+
+    assert_eq!(
+        hybrid_responder.read_message(&pq_message_1, &mut payload_output),
+        Err(Error::BadMessage),
+    );
+    assert_eq!(
+        pq_responder.read_message(&hybrid_message_1, &mut payload_output),
+        Err(Error::BadMessage),
+    );
+    assert!(!hybrid_responder.is_remote_authenticated());
+    assert!(!pq_responder.is_remote_authenticated());
+}
 
 #[test]
-fn pq_buffer_too_small() {
-    let i_kp = PqKeyPair::generate(&mut OsRng);
-    let r_kp = PqKeyPair::generate(&mut OsRng);
+fn pq_and_hybrid_reject_wrong_state_calls() {
+    let pq_initiator = PqKeyPair::generate(&mut OsRng);
+    let pq_responder = PqKeyPair::generate(&mut OsRng);
+    let mut pq = PqHandshake::new_initiator(&pq_initiator, &pq_responder.public, &[]).unwrap();
+    let mut output = [0u8; BUFFER_LEN];
 
-    let mut initiator = PqHandshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
+    assert_eq!(
+        pq.read_message(&[0u8; 3472], &mut output),
+        Err(Error::WrongState),
+    );
 
-    let mut small_buf = vec![0u8; 100]; // Way too small for PQ msg1
-    let result = initiator.write_message(&[], &mut small_buf);
-    assert_eq!(result, Err(Error::BufferTooSmall));
+    let hybrid_initiator = HybridKeyPair::generate(&mut OsRng);
+    let hybrid_responder = HybridKeyPair::generate(&mut OsRng);
+    let mut hybrid = HybridHandshake::new_responder(&hybrid_responder, &[]).unwrap();
+
+    assert_eq!(
+        hybrid.write_message(&[], &mut output),
+        Err(Error::WrongState),
+    );
+    assert!(
+        HybridHandshake::new_initiator(&hybrid_initiator, &hybrid_responder.public, &[],).is_ok(),
+    );
 }

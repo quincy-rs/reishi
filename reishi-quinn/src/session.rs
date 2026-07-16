@@ -1,8 +1,9 @@
 //! Noise IK handshake session implementing `quinn_proto::crypto::Session`.
 //!
 //! `NoiseSession` drives the reishi-handshake `Handshake` state machine
-//! through the two-message IK pattern, framing messages for QUIC's CRYPTO
-//! stream and deriving QUIC encryption keys from the handshake output.
+//! through classical two-message IK or a confirmed three-flight PQ pattern,
+//! framing messages for QUIC's CRYPTO stream and deriving QUIC keys only after
+//! the selected handshake completes.
 
 use std::any::Any;
 use std::collections::HashSet;
@@ -19,13 +20,16 @@ use crate::active_handshake::{ActiveHandshake, RemoteIdentity};
 use crate::framing::HandshakeMessageFramer;
 use crate::initial::{initial_level_secret, retry_integrity_key};
 use crate::keys::{keys_from_level_secret, packet_keys_from_level_secret};
-use crate::{ASK_LABEL, NoiseConfig, PeerIdentity, PublicKey};
+use crate::{ASK_LABEL, NoiseConfig, PeerIdentity, PeerPublicKey};
 
 #[cfg(feature = "pq")]
-use crate::pq_config::PqNoiseConfig;
+use crate::pq_config::{HybridNoiseConfig, PqNoiseConfig};
 
 /// TLS alert code for handshake failure (used in QUIC crypto error frames).
 const TLS_HANDSHAKE_FAILURE: u8 = 40;
+
+/// Domain separator placed between the configured prologue and QUIC version.
+const QUIC_VERSION_PROLOGUE_LABEL: &[u8] = b"\0reishi-quic-version\0";
 
 /// Maximum allowed size for a Retry packet (header + payload).
 ///
@@ -34,6 +38,18 @@ const TLS_HANDSHAKE_FAILURE: u8 = 40;
 /// This conservative limit of 65527 bytes (max UDP payload) prevents DoS via
 /// repeated large allocations while accommodating any legitimate Retry packet.
 const MAX_RETRY_PACKET_SIZE: usize = 65527;
+
+/// Bind the negotiated QUIC version into the Noise transcript prologue.
+fn quic_prologue(configured_prologue: &[u8], version: u32) -> Vec<u8> {
+    let mut prologue =
+        Vec::with_capacity(configured_prologue.len() + QUIC_VERSION_PROLOGUE_LABEL.len() + 4);
+
+    prologue.extend_from_slice(configured_prologue);
+    prologue.extend_from_slice(QUIC_VERSION_PROLOGUE_LABEL);
+    prologue.extend_from_slice(&version.to_be_bytes());
+
+    prologue
+}
 
 /// Internal handshake state: either in-progress or completed.
 pub(crate) enum HandshakeState {
@@ -48,13 +64,14 @@ pub(crate) enum HandshakeState {
         data_level_secret: [u8; HASH_LEN],
         /// Secret for `export_keying_material` derivation.
         ekm_secret: [u8; HASH_LEN],
-        /// The remote peer's static X25519 public key.
-        remote_public: [u8; 32],
+        /// The authenticated remote peer's typed static public key.
+        remote_public: PeerPublicKey,
         /// The final handshake hash.
         handshake_hash: [u8; HASH_LEN],
-        /// The remote peer's full hybrid PQ public key (if PQ handshake).
-        #[cfg(feature = "pq")]
-        remote_pq_public: Option<reishi_handshake::PqPublicKey>,
+        /// Whether the initiator must first receive the responder's Handshake marker.
+        wait_for_peer_handshake: bool,
+        /// Whether that authenticated Handshake-space marker has arrived.
+        peer_handshake_received: bool,
     },
     /// Handshake fully completed; contains the rekeying secret for
     /// 1-RTT key updates and the handshake hash.
@@ -63,13 +80,10 @@ pub(crate) enum HandshakeState {
         rekey_secret: [u8; HASH_LEN],
         /// Secret for `export_keying_material` derivation.
         ekm_secret: [u8; HASH_LEN],
-        /// The remote peer's static X25519 public key.
-        remote_public: [u8; 32],
+        /// The authenticated remote peer's typed static public key.
+        remote_public: PeerPublicKey,
         /// The final handshake hash.
         handshake_hash: [u8; HASH_LEN],
-        /// The remote peer's full hybrid PQ public key (if PQ handshake).
-        #[cfg(feature = "pq")]
-        remote_pq_public: Option<reishi_handshake::PqPublicKey>,
     },
     /// Handshake failed and session is dead.
     Failed,
@@ -122,6 +136,9 @@ pub struct NoiseSession {
     /// Optional whitelist of allowed client PQ public keys (server-side only, PQ mode).
     #[cfg(feature = "pq")]
     allowed_pq_keys: Option<Arc<HashSet<reishi_handshake::PqPublicKey>>>,
+    /// Optional whitelist of allowed hybrid client keys (server-side only).
+    #[cfg(feature = "pq")]
+    allowed_hybrid_keys: Option<Arc<HashSet<reishi_handshake::HybridPublicKey>>>,
 }
 
 impl NoiseSession {
@@ -138,25 +155,28 @@ impl NoiseSession {
             allowed_keys: None,
             #[cfg(feature = "pq")]
             allowed_pq_keys: None,
+            #[cfg(feature = "pq")]
+            allowed_hybrid_keys: None,
         }
     }
 
     /// Create a new initiator (client) session.
     pub(crate) fn new_initiator(config: &Arc<NoiseConfig>, version: u32, params: Vec<u8>) -> Self {
+        let prologue = quic_prologue(config.prologue.as_deref().unwrap_or(b""), version);
         let handshake = reishi_handshake::Handshake::new_initiator(
             &config.local_keypair,
             config
                 .remote_public
                 .as_ref()
                 .expect("initiator must have remote public key"),
-            config.prologue.as_deref().unwrap_or(b""),
+            &prologue,
         )
         .expect("handshake initialization should succeed with valid keys");
 
         Self {
             is_initiator: true,
             version,
-            state: HandshakeState::InProgress(Box::new(ActiveHandshake::Standard(Box::new(
+            state: HandshakeState::InProgress(Box::new(ActiveHandshake::Classical(Box::new(
                 handshake,
             )))),
             framer: HandshakeMessageFramer::default(),
@@ -166,21 +186,22 @@ impl NoiseSession {
             allowed_keys: None,
             #[cfg(feature = "pq")]
             allowed_pq_keys: None,
+            #[cfg(feature = "pq")]
+            allowed_hybrid_keys: None,
         }
     }
 
     /// Create a new responder (server) session.
     pub(crate) fn new_responder(config: &Arc<NoiseConfig>, version: u32, params: Vec<u8>) -> Self {
-        let handshake = reishi_handshake::Handshake::new_responder(
-            &config.local_keypair,
-            config.prologue.as_deref().unwrap_or(b""),
-        )
-        .expect("responder handshake initialization should succeed");
+        let prologue = quic_prologue(config.prologue.as_deref().unwrap_or(b""), version);
+        let handshake =
+            reishi_handshake::Handshake::new_responder(&config.local_keypair, &prologue)
+                .expect("responder handshake initialization should succeed");
 
         Self {
             is_initiator: false,
             version,
-            state: HandshakeState::InProgress(Box::new(ActiveHandshake::Standard(Box::new(
+            state: HandshakeState::InProgress(Box::new(ActiveHandshake::Classical(Box::new(
                 handshake,
             )))),
             framer: HandshakeMessageFramer::default(),
@@ -190,6 +211,8 @@ impl NoiseSession {
             allowed_keys: config.allowed_keys.clone(),
             #[cfg(feature = "pq")]
             allowed_pq_keys: None,
+            #[cfg(feature = "pq")]
+            allowed_hybrid_keys: None,
         }
     }
 
@@ -200,26 +223,30 @@ impl NoiseSession {
         version: u32,
         params: Vec<u8>,
     ) -> Self {
+        let prologue = quic_prologue(config.prologue.as_deref().unwrap_or(b""), version);
         let handshake = reishi_handshake::PqHandshake::new_initiator(
             &config.local_keypair,
             config
                 .remote_public
                 .as_ref()
                 .expect("PQ initiator must have remote public key"),
-            config.prologue.as_deref().unwrap_or(b""),
+            &prologue,
         )
         .expect("PQ handshake initialization should succeed with valid keys");
 
         Self {
             is_initiator: true,
             version,
-            state: HandshakeState::InProgress(Box::new(ActiveHandshake::Pq(Box::new(handshake)))),
+            state: HandshakeState::InProgress(Box::new(ActiveHandshake::PostQuantum(Box::new(
+                handshake,
+            )))),
             framer: HandshakeMessageFramer::default(),
             local_params: Some(params),
             peer_params: None,
             handshake_data_ready: false,
             allowed_keys: None,
             allowed_pq_keys: None,
+            allowed_hybrid_keys: None,
         }
     }
 
@@ -230,22 +257,86 @@ impl NoiseSession {
         version: u32,
         params: Vec<u8>,
     ) -> Self {
-        let handshake = reishi_handshake::PqHandshake::new_responder(
-            &config.local_keypair,
-            config.prologue.as_deref().unwrap_or(b""),
-        )
-        .expect("PQ responder handshake initialization should succeed");
+        let prologue = quic_prologue(config.prologue.as_deref().unwrap_or(b""), version);
+        let handshake =
+            reishi_handshake::PqHandshake::new_responder(&config.local_keypair, &prologue)
+                .expect("PQ responder handshake initialization should succeed");
 
         Self {
             is_initiator: false,
             version,
-            state: HandshakeState::InProgress(Box::new(ActiveHandshake::Pq(Box::new(handshake)))),
+            state: HandshakeState::InProgress(Box::new(ActiveHandshake::PostQuantum(Box::new(
+                handshake,
+            )))),
             framer: HandshakeMessageFramer::default(),
             local_params: Some(params),
             peer_params: None,
             handshake_data_ready: false,
             allowed_keys: None,
             allowed_pq_keys: config.allowed_keys.clone(),
+            allowed_hybrid_keys: None,
+        }
+    }
+
+    /// Create a new hybrid initiator (client) session.
+    #[cfg(feature = "pq")]
+    pub(crate) fn new_hybrid_initiator(
+        config: &Arc<HybridNoiseConfig>,
+        version: u32,
+        params: Vec<u8>,
+    ) -> Self {
+        let prologue = quic_prologue(config.prologue.as_deref().unwrap_or(b""), version);
+        let handshake = reishi_handshake::HybridHandshake::new_initiator(
+            &config.local_keypair,
+            config
+                .remote_public
+                .as_ref()
+                .expect("hybrid initiator must have remote public key"),
+            &prologue,
+        )
+        .expect("hybrid handshake initialization should succeed with valid keys");
+
+        Self {
+            is_initiator: true,
+            version,
+            state: HandshakeState::InProgress(Box::new(ActiveHandshake::Hybrid(Box::new(
+                handshake,
+            )))),
+            framer: HandshakeMessageFramer::default(),
+            local_params: Some(params),
+            peer_params: None,
+            handshake_data_ready: false,
+            allowed_keys: None,
+            allowed_pq_keys: None,
+            allowed_hybrid_keys: None,
+        }
+    }
+
+    /// Create a new hybrid responder (server) session.
+    #[cfg(feature = "pq")]
+    pub(crate) fn new_hybrid_responder(
+        config: &Arc<HybridNoiseConfig>,
+        version: u32,
+        params: Vec<u8>,
+    ) -> Self {
+        let prologue = quic_prologue(config.prologue.as_deref().unwrap_or(b""), version);
+        let handshake =
+            reishi_handshake::HybridHandshake::new_responder(&config.local_keypair, &prologue)
+                .expect("hybrid responder handshake initialization should succeed");
+
+        Self {
+            is_initiator: false,
+            version,
+            state: HandshakeState::InProgress(Box::new(ActiveHandshake::Hybrid(Box::new(
+                handshake,
+            )))),
+            framer: HandshakeMessageFramer::default(),
+            local_params: Some(params),
+            peer_params: None,
+            handshake_data_ready: false,
+            allowed_keys: None,
+            allowed_pq_keys: None,
+            allowed_hybrid_keys: config.allowed_keys.clone(),
         }
     }
 
@@ -278,24 +369,37 @@ impl NoiseSession {
                 .read_message(&message, &mut payload_buf)
                 .map_err(|_| Self::crypto_error())?;
 
-            // Server-side whitelist check: reject unknown clients immediately
-            // after decrypting Message 1, before sending Message 2.
-            if !self.is_initiator {
+            // A PQ identity remains pending until Message 3 proves possession
+            // of the claimed initiator static secret.
+            if !self.is_initiator && handshake.is_remote_authenticated() {
                 let remote = handshake.remote_identity().ok_or_else(Self::crypto_error)?;
+
                 match remote {
-                    RemoteIdentity::Standard(key) => {
+                    RemoteIdentity::Classical(key) => {
                         if let Some(ref allowed) = self.allowed_keys {
                             if !allowed.contains(&key) {
                                 self.state = HandshakeState::Failed;
+
                                 return Err(Self::crypto_error());
                             }
                         }
                     }
                     #[cfg(feature = "pq")]
-                    RemoteIdentity::Pq(key) => {
+                    RemoteIdentity::PostQuantum(key) => {
                         if let Some(ref allowed) = self.allowed_pq_keys {
                             if !allowed.contains(&*key) {
                                 self.state = HandshakeState::Failed;
+
+                                return Err(Self::crypto_error());
+                            }
+                        }
+                    }
+                    #[cfg(feature = "pq")]
+                    RemoteIdentity::Hybrid(key) => {
+                        if let Some(ref allowed) = self.allowed_hybrid_keys {
+                            if !allowed.contains(&*key) {
+                                self.state = HandshakeState::Failed;
+
                                 return Err(Self::crypto_error());
                             }
                         }
@@ -303,7 +407,7 @@ impl NoiseSession {
                 }
             }
 
-            if self.peer_params.is_none() && payload_len > 0 {
+            if self.peer_params.is_none() && handshake.is_remote_authenticated() {
                 // TransportParameters::read(side) takes the LOCAL side (the
                 // reader), not the peer's side. This controls which server-only
                 // or client-only parameters are accepted.
@@ -321,7 +425,10 @@ impl NoiseSession {
                 self.peer_params = Some(params);
             }
 
-            if !self.handshake_data_ready {
+            if handshake.is_remote_authenticated()
+                && self.peer_params.is_some()
+                && !self.handshake_data_ready
+            {
                 self.handshake_data_ready = true;
                 new_handshake_data = true;
             }
@@ -346,14 +453,22 @@ impl NoiseSession {
         &mut self,
         buf: &mut Vec<u8>,
     ) -> Result<Option<crypto::Keys>, TransportError> {
+        if let HandshakeState::AwaitingDataKeys {
+            wait_for_peer_handshake: true,
+            peer_handshake_received: false,
+            ..
+        } = &self.state
+        {
+            return Ok(None);
+        }
+
         // Phase 2: write confirmation frame and return Data keys.
         if let HandshakeState::AwaitingDataKeys {
             data_level_secret,
             ekm_secret,
             remote_public,
             handshake_hash,
-            #[cfg(feature = "pq")]
-            remote_pq_public,
+            ..
         } = &self.state
         {
             // Write a zero-length confirmation frame. This ensures quinn has
@@ -370,18 +485,14 @@ impl NoiseSession {
             rekey_secret.copy_from_slice(&*rekey_secret_z);
 
             let ekm_secret = *ekm_secret;
-            let remote_public = *remote_public;
+            let remote_public = remote_public.clone();
             let handshake_hash = *handshake_hash;
-            #[cfg(feature = "pq")]
-            let remote_pq_public = remote_pq_public.clone();
 
             self.state = HandshakeState::Completed {
                 rekey_secret,
                 ekm_secret,
                 remote_public,
                 handshake_hash,
-                #[cfg(feature = "pq")]
-                remote_pq_public,
             };
 
             return Ok(Some(data_keys));
@@ -393,16 +504,25 @@ impl NoiseSession {
         };
 
         // Write outgoing Noise message if needed.
+        let mut wrote_handshake_message = false;
+
         if handshake.next_action() == HandshakeAction::WriteMessage {
-            let payload = self.local_params.take().unwrap_or_default();
+            let payload = if handshake.next_message_accepts_payload() {
+                self.local_params.take().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
             let overhead = handshake.next_message_overhead();
             let mut message = vec![0u8; payload.len() + overhead];
-            let msg_len = handshake
+
+            let message_length = handshake
                 .write_message(&payload, &mut message)
                 .map_err(|_| Self::crypto_error())?;
-            message.truncate(msg_len);
+            message.truncate(message_length);
 
             HandshakeMessageFramer::write_frame(buf, &message).map_err(|_| Self::crypto_error())?;
+            wrote_handshake_message = true;
         }
 
         // Noise handshake is complete — derive and return Handshake-level keys.
@@ -426,12 +546,14 @@ impl NoiseSession {
             let hs_keys = keys_from_level_secret(self.is_initiator, &hs_level_secret);
             hs_level_secret.zeroize();
 
-            #[cfg(feature = "pq")]
-            let remote_pq_public = handshake.remote_pq_public();
+            let remote_public = match handshake.remote_identity().ok_or_else(Self::crypto_error)? {
+                RemoteIdentity::Classical(key) => PeerPublicKey::Classical(key),
+                #[cfg(feature = "pq")]
+                RemoteIdentity::PostQuantum(key) => PeerPublicKey::PostQuantum(*key),
+                #[cfg(feature = "pq")]
+                RemoteIdentity::Hybrid(key) => PeerPublicKey::Hybrid(*key),
+            };
 
-            let remote_public = handshake
-                .remote_dh_public_bytes()
-                .ok_or_else(Self::crypto_error)?;
             let handshake_hash = *handshake
                 .handshake_hash()
                 .map_err(|_| Self::crypto_error())?;
@@ -441,8 +563,8 @@ impl NoiseSession {
                 ekm_secret,
                 remote_public,
                 handshake_hash,
-                #[cfg(feature = "pq")]
-                remote_pq_public,
+                wait_for_peer_handshake: self.is_initiator && wrote_handshake_message,
+                peer_handshake_received: false,
             };
 
             return Ok(Some(hs_keys));
@@ -470,39 +592,22 @@ impl crypto::Session for NoiseSession {
 
     fn peer_identity(&self) -> Option<Box<dyn Any>> {
         match &self.state {
-            HandshakeState::InProgress(h) => {
-                let remote = h.remote_dh_public_bytes()?;
-                let hash = *h.handshake_hash().ok()?;
-                Some(Box::new(PeerIdentity {
-                    public_key: PublicKey::from_bytes(remote),
-                    handshake_hash: hash,
-                    #[cfg(feature = "pq")]
-                    pq_public_key: h.remote_pq_public(),
-                }))
-            }
+            HandshakeState::InProgress(_) => None,
             HandshakeState::AwaitingDataKeys {
                 remote_public,
                 handshake_hash,
-                #[cfg(feature = "pq")]
-                remote_pq_public,
                 ..
             } => Some(Box::new(PeerIdentity {
-                public_key: PublicKey::from_bytes(*remote_public),
+                public_key: remote_public.clone(),
                 handshake_hash: *handshake_hash,
-                #[cfg(feature = "pq")]
-                pq_public_key: remote_pq_public.clone(),
             })),
             HandshakeState::Completed {
                 remote_public,
                 handshake_hash,
-                #[cfg(feature = "pq")]
-                remote_pq_public,
                 ..
             } => Some(Box::new(PeerIdentity {
-                public_key: PublicKey::from_bytes(*remote_public),
+                public_key: remote_public.clone(),
                 handshake_hash: *handshake_hash,
-                #[cfg(feature = "pq")]
-                pq_public_key: remote_pq_public.clone(),
             })),
             HandshakeState::Failed => None,
         }
@@ -528,12 +633,34 @@ impl crypto::Session for NoiseSession {
             return Err(Self::crypto_error());
         }
 
-        // After the Noise handshake completes, the only CRYPTO data we receive
-        // is the peer's zero-length confirmation frame. Ignore it gracefully.
-        if matches!(
-            self.state,
-            HandshakeState::Completed { .. } | HandshakeState::AwaitingDataKeys { .. }
-        ) {
+        if matches!(self.state, HandshakeState::AwaitingDataKeys { .. }) {
+            if self.framer.ingest_bytes(buf).is_err() {
+                self.state = HandshakeState::Failed;
+
+                return Err(Self::crypto_error());
+            }
+
+            let confirmation = self.framer.pop_message();
+
+            if confirmation.as_deref() != Some(&[]) || self.framer.pop_message().is_some() {
+                self.state = HandshakeState::Failed;
+
+                return Err(Self::crypto_error());
+            }
+
+            if let HandshakeState::AwaitingDataKeys {
+                peer_handshake_received,
+                ..
+            } = &mut self.state
+            {
+                *peer_handshake_received = true;
+            }
+
+            return Ok(false);
+        }
+
+        // Quinn may retransmit its empty Handshake-space marker after keys are installed.
+        if matches!(self.state, HandshakeState::Completed { .. }) {
             return Ok(false);
         }
 
@@ -647,6 +774,42 @@ mod tests {
     /// is sufficient.
     fn test_session() -> NoiseSession {
         NoiseSession::failed()
+    }
+
+    #[test]
+    fn quic_prologue_binds_the_selected_version() {
+        let version_1_prologue = quic_prologue(b"application", 0x52510301);
+        let version_2_prologue = quic_prologue(b"application", 0x52510302);
+
+        assert!(version_1_prologue.starts_with(b"application"));
+        assert_eq!(
+            &version_1_prologue
+                [b"application".len()..b"application".len() + QUIC_VERSION_PROLOGUE_LABEL.len()],
+            QUIC_VERSION_PROLOGUE_LABEL,
+        );
+        assert_eq!(
+            &version_1_prologue[version_1_prologue.len() - 4..],
+            &0x52510301u32.to_be_bytes(),
+        );
+        assert_ne!(version_1_prologue, version_2_prologue);
+    }
+
+    #[test]
+    fn malformed_confirmation_framing_fails_the_session() {
+        let remote_keypair = reishi_handshake::KeyPair::generate(&mut rand_core::OsRng);
+        let mut session = test_session();
+
+        session.state = HandshakeState::AwaitingDataKeys {
+            data_level_secret: [1u8; HASH_LEN],
+            ekm_secret: [2u8; HASH_LEN],
+            remote_public: PeerPublicKey::Classical(remote_keypair.public),
+            handshake_hash: [3u8; HASH_LEN],
+            wait_for_peer_handshake: true,
+            peer_handshake_received: false,
+        };
+
+        assert!(session.read_handshake(&[0xff; 8]).is_err());
+        assert!(matches!(session.state, HandshakeState::Failed));
     }
 
     #[test]

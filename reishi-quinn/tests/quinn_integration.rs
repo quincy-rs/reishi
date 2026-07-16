@@ -10,8 +10,8 @@ use std::sync::Arc;
 use quinn::{ClientConfig, Endpoint, EndpointConfig, ServerConfig};
 use rand_core::OsRng;
 use reishi_quinn::{
-    KeyPair, NoiseConfigBuilder, PeerIdentity, REISHI_V1_QUIC_V1, noise_handshake_token_key,
-    noise_hmac_key,
+    KeyPair, NoiseConfigBuilder, PeerIdentity, PeerPublicKey, REISHI_V1_QUIC_V1,
+    noise_handshake_token_key, noise_hmac_key,
 };
 
 /// Build an EndpointConfig that supports our custom QUIC version.
@@ -137,7 +137,10 @@ async fn peer_identity_available() {
         .expect("client should have peer identity")
         .downcast::<PeerIdentity>()
         .expect("should downcast to PeerIdentity");
-    assert_eq!(client_peer.public_key, server_public);
+    assert_eq!(
+        client_peer.public_key,
+        PeerPublicKey::Classical(server_public),
+    );
 
     // Server sees client's public key
     let server_peer = server_conn
@@ -145,7 +148,10 @@ async fn peer_identity_available() {
         .expect("server should have peer identity")
         .downcast::<PeerIdentity>()
         .expect("should downcast to PeerIdentity");
-    assert_eq!(server_peer.public_key, client_public);
+    assert_eq!(
+        server_peer.public_key,
+        PeerPublicKey::Classical(client_public),
+    );
 
     // Handshake hashes match
     assert_eq!(client_peer.handshake_hash, server_peer.handshake_hash);

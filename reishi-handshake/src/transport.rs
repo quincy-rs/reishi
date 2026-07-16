@@ -5,7 +5,7 @@ use crate::crypto::aead::AEAD_TAG_LEN;
 use crate::crypto::hash::HASH_LEN;
 use crate::error::Error;
 
-/// Maximum accepted transport message size in bytes.
+/// Maximum transport message size accepted or emitted, in bytes.
 ///
 /// Prevents unbounded memory allocation from peers sending oversized messages.
 /// This limit (65535 = u16::MAX) is consistent with handshake limits and allows
@@ -57,6 +57,15 @@ impl TransportState {
     /// Returns the number of bytes written to `out` (payload + AEAD tag).
     /// `out` must be at least `payload.len() + 16` bytes.
     pub fn write_message(&mut self, payload: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+        let message_len = payload
+            .len()
+            .checked_add(AEAD_TAG_LEN)
+            .ok_or(Error::BadMessage)?;
+
+        if message_len > MAX_MESSAGE_LEN {
+            return Err(Error::BadMessage);
+        }
+
         self.send.encrypt_with_ad(&[], payload, out)
     }
 

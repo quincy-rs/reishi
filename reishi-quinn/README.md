@@ -14,23 +14,32 @@ Reishi connections use custom QUIC version numbers to distinguish themselves fro
 
 ```
 REISHI_V1_QUIC_V1:    0x52510101  // "RQ\x01\x01"
-REISHI_PQ_V1_QUIC_V1: 0x52510201  // "RQ\x02\x01" (pq feature)
+REISHI_PQ_KEM_V1_QUIC_V1:    0x52510301  // KEM-only pqIK
+REISHI_PQ_HYBRID_V1_QUIC_V1: 0x52510401  // hybrid IK + pqIK
 ```
+
+The selected QUIC version is domain-separated and mixed into the Noise prologue, preventing transcript reuse if a future QUIC version keeps the same Noise ciphersuite name.
+
+The former post-quantum wire version `0x52510201` is retired. It used the removed ad-hoc IKpq construction and is intentionally incompatible with both confirmed suites.
 
 ### Key derivation
 
 QUIC needs multiple key levels (initial, handshake, 1-RTT), each with separate header protection and packet protection keys for both directions. Reishi derives these using the Noise ASK (Additional Symmetric Keys) mechanism, which extracts extra keys from the chaining key via HKDF with domain-separated labels:
 
 1. **Initial keys**: derived from the client's Destination Connection ID with label `"reishi initial"`
-2. **Handshake keys**: derived from the Noise chaining key after Message 1, with label `"reishi key"`
-3. **1-RTT keys**: derived from the next chaining key after Message 2
+2. **Handshake keys**: derived from the confirmed Noise chaining key with label `"reishi key"`
+3. **1-RTT keys**: domain-separated from the confirmed handshake secret
 4. **Rekeying**: uses Noise's built-in `rekey()` for key updates
 
 Each level produces four subkeys: `"init hp"`, `"resp hp"`, `"init data"`, `"resp data"`.
 
 ### Transport parameters
 
-Both sides exchange QUIC transport parameters inside Noise handshake payloads: the initiator in Message 1, the responder in Message 2. Since IK is a two-message pattern and both messages carry encrypted payloads, no deferral is needed.
+Classical IK carries initiator parameters in Message 1 and responder parameters in Message 2. The confirmed PQ suites carry responder parameters in Message 2 and initiator parameters in Message 3. PQ Message 1 accepts no payload, so the responder cannot consume client transport parameters before the claimed client identity is confirmed.
+
+PQ and hybrid client allowlists are enforced after Message 3 confirms the claimed static secrets. A client holding any valid keypair can therefore decrypt the responder's non-secret transport parameters in Message 2 even when its key is not allowlisted. Checking earlier would expose allowlist membership to unauthenticated probes.
+
+Use `PqNoiseConfigBuilder` for KEM-only `pqIK` and `HybridNoiseConfigBuilder` for hybrid IK + `pqIK`. `PeerIdentity` exposes a typed `PeerPublicKey::{Classical, PostQuantum, Hybrid}` after authentication.
 
 ### Framing
 
