@@ -1,8 +1,8 @@
 //! PQ integration tests using the full quinn QUIC stack.
 //!
-//! These tests verify that the hybrid PQ Noise IK handshake works correctly
-//! as a drop-in crypto provider for quinn, exercising the complete connection
-//! lifecycle: handshake, data transfer, peer identity, EKM, and error cases.
+//! These tests verify both confirmed PQ suites as Quinn crypto providers,
+//! exercising handshakes, streams, typed identities, EKM, allowlists, suite
+//! separation, version retirement, and connection reuse.
 
 #![cfg(feature = "pq")]
 
@@ -12,14 +12,15 @@ use std::sync::Arc;
 use quinn::{ClientConfig, Endpoint, EndpointConfig, ServerConfig};
 use rand_core::OsRng;
 use reishi_quinn::{
-    PeerIdentity, PqKeyPair, PqNoiseConfigBuilder, REISHI_PQ_V1_QUIC_V1, noise_handshake_token_key,
-    noise_hmac_key,
+    HybridKeyPair, HybridNoiseConfigBuilder, PeerIdentity, PeerPublicKey, PqKeyPair,
+    PqNoiseConfigBuilder, REISHI_PQ_HYBRID_V1_QUIC_V1, REISHI_PQ_KEM_V1_QUIC_V1,
+    noise_handshake_token_key, noise_hmac_key,
 };
 
 /// Build an EndpointConfig that supports the PQ QUIC version.
 fn pq_endpoint_config() -> EndpointConfig {
     let mut config = EndpointConfig::new(noise_hmac_key());
-    config.supported_versions(vec![REISHI_PQ_V1_QUIC_V1]);
+    config.supported_versions(vec![REISHI_PQ_KEM_V1_QUIC_V1]);
     config
 }
 
@@ -62,7 +63,75 @@ fn make_pq_client_config(kp: PqKeyPair, server_public: reishi_quinn::PqPublicKey
         .build_client_config()
         .unwrap();
     let mut config = ClientConfig::new(Arc::new(noise));
-    config.version(REISHI_PQ_V1_QUIC_V1);
+    config.version(REISHI_PQ_KEM_V1_QUIC_V1);
+    config
+}
+
+/// Build an EndpointConfig that supports only the hybrid QUIC version.
+fn hybrid_endpoint_config() -> EndpointConfig {
+    let mut config = EndpointConfig::new(noise_hmac_key());
+    config.supported_versions(vec![REISHI_PQ_HYBRID_V1_QUIC_V1]);
+
+    config
+}
+
+/// Create a hybrid server endpoint on a random loopback port.
+fn hybrid_server_endpoint(server_config: ServerConfig) -> Endpoint {
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let runtime = quinn::default_runtime().unwrap();
+
+    Endpoint::new(
+        hybrid_endpoint_config(),
+        Some(server_config),
+        socket,
+        runtime,
+    )
+    .unwrap()
+}
+
+/// Create a hybrid client-only endpoint on a random loopback port.
+fn hybrid_client_endpoint() -> Endpoint {
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let runtime = quinn::default_runtime().unwrap();
+
+    Endpoint::new(hybrid_endpoint_config(), None, socket, runtime).unwrap()
+}
+
+/// Build a hybrid server configuration without a client allowlist.
+fn make_hybrid_server_config(keypair: HybridKeyPair) -> ServerConfig {
+    let noise = HybridNoiseConfigBuilder::new(keypair)
+        .build_server_config()
+        .unwrap();
+
+    ServerConfig::new(Arc::new(noise), noise_handshake_token_key())
+}
+
+/// Build a hybrid server configuration with an authenticated client allowlist.
+fn make_hybrid_server_config_with_allowed_keys(
+    keypair: HybridKeyPair,
+    allowed: impl IntoIterator<Item = reishi_quinn::HybridPublicKey>,
+) -> ServerConfig {
+    let noise = HybridNoiseConfigBuilder::new(keypair)
+        .with_allowed_keys(allowed)
+        .build_server_config()
+        .unwrap();
+
+    ServerConfig::new(Arc::new(noise), noise_handshake_token_key())
+}
+
+/// Build a hybrid client configuration pinned to the server's hybrid key.
+fn make_hybrid_client_config(
+    keypair: HybridKeyPair,
+    server_public: reishi_quinn::HybridPublicKey,
+) -> ClientConfig {
+    let noise = HybridNoiseConfigBuilder::new(keypair)
+        .with_remote_public(server_public)
+        .build_client_config()
+        .unwrap();
+    let mut config = ClientConfig::new(Arc::new(noise));
+
+    config.version(REISHI_PQ_HYBRID_V1_QUIC_V1);
+
     config
 }
 
@@ -133,43 +202,25 @@ async fn pq_peer_identity_available() {
         server.accept().await.unwrap().await.unwrap()
     },);
 
-    // Client sees server's DH public key
     let client_peer = client_conn
         .peer_identity()
         .expect("client should have peer identity")
         .downcast::<PeerIdentity>()
         .expect("should downcast to PeerIdentity");
-    assert_eq!(client_peer.public_key, *server_public.dh_public());
-
-    // Client sees server's full PQ public key
-    let client_pq = client_peer
-        .pq_public_key
-        .as_ref()
-        .expect("PQ public key should be present");
     assert_eq!(
-        client_pq.dh_public().as_bytes(),
-        server_public.dh_public().as_bytes()
+        client_peer.public_key,
+        PeerPublicKey::PostQuantum(server_public),
     );
-    assert_eq!(client_pq.kem_ek(), server_public.kem_ek());
 
-    // Server sees client's DH public key
     let server_peer = server_conn
         .peer_identity()
         .expect("server should have peer identity")
         .downcast::<PeerIdentity>()
         .expect("should downcast to PeerIdentity");
-    assert_eq!(server_peer.public_key, *client_public.dh_public());
-
-    // Server sees client's full PQ public key
-    let server_pq = server_peer
-        .pq_public_key
-        .as_ref()
-        .expect("PQ public key should be present");
     assert_eq!(
-        server_pq.dh_public().as_bytes(),
-        client_public.dh_public().as_bytes()
+        server_peer.public_key,
+        PeerPublicKey::PostQuantum(client_public),
     );
-    assert_eq!(server_pq.kem_ek(), client_public.kem_ek());
 
     // Handshake hashes match
     assert_eq!(client_peer.handshake_hash, server_peer.handshake_hash);
@@ -368,7 +419,7 @@ async fn pq_prologue_mismatch_rejected() {
         .build_client_config()
         .unwrap();
     let mut client_config = ClientConfig::new(Arc::new(client_noise));
-    client_config.version(REISHI_PQ_V1_QUIC_V1);
+    client_config.version(REISHI_PQ_KEM_V1_QUIC_V1);
 
     let connecting = client
         .connect_with(client_config, server_addr, "server")
@@ -510,4 +561,259 @@ async fn pq_empty_whitelist_rejects_all() {
     }
 
     server_task.abort();
+}
+
+// =========================================================================
+// Hybrid handshake, typed identity, streams, and EKM
+// =========================================================================
+
+#[tokio::test]
+async fn hybrid_handshake_identity_streams_and_ekm() {
+    let server_keypair = HybridKeyPair::generate(&mut OsRng);
+    let server_public = server_keypair.public.clone();
+    let client_keypair = HybridKeyPair::generate(&mut OsRng);
+    let client_public = client_keypair.public.clone();
+
+    let server = hybrid_server_endpoint(make_hybrid_server_config(server_keypair));
+    let server_address = server.local_addr().unwrap();
+    let client = hybrid_client_endpoint();
+    let client_config = make_hybrid_client_config(client_keypair, server_public.clone());
+    let connecting = client
+        .connect_with(client_config, server_address, "server")
+        .unwrap();
+
+    let (client_connection, server_connection) =
+        tokio::join!(async { connecting.await.unwrap() }, async {
+            server.accept().await.unwrap().await.unwrap()
+        },);
+
+    let client_identity = client_connection
+        .peer_identity()
+        .unwrap()
+        .downcast::<PeerIdentity>()
+        .unwrap();
+    let server_identity = server_connection
+        .peer_identity()
+        .unwrap()
+        .downcast::<PeerIdentity>()
+        .unwrap();
+
+    assert_eq!(
+        client_identity.public_key,
+        PeerPublicKey::Hybrid(server_public),
+    );
+    assert_eq!(
+        server_identity.public_key,
+        PeerPublicKey::Hybrid(client_public),
+    );
+    assert_eq!(
+        client_identity.handshake_hash,
+        server_identity.handshake_hash,
+    );
+
+    let mut client_export = [0u8; 64];
+    let mut server_export = [0u8; 64];
+
+    client_connection
+        .export_keying_material(&mut client_export, b"hybrid label", b"context")
+        .unwrap();
+    server_connection
+        .export_keying_material(&mut server_export, b"hybrid label", b"context")
+        .unwrap();
+
+    assert_eq!(client_export, server_export);
+
+    let mut client_send = client_connection.open_uni().await.unwrap();
+    client_send
+        .write_all(b"hybrid client stream")
+        .await
+        .unwrap();
+    client_send.finish().unwrap();
+
+    let mut server_receive = server_connection.accept_uni().await.unwrap();
+    let client_data = server_receive.read_to_end(4096).await.unwrap();
+    assert_eq!(client_data, b"hybrid client stream");
+
+    let mut server_send = server_connection.open_uni().await.unwrap();
+    server_send
+        .write_all(b"hybrid server stream")
+        .await
+        .unwrap();
+    server_send.finish().unwrap();
+
+    let mut client_receive = client_connection.accept_uni().await.unwrap();
+    let server_data = client_receive.read_to_end(4096).await.unwrap();
+    assert_eq!(server_data, b"hybrid server stream");
+
+    client_connection.close(0u32.into(), b"done");
+    server_connection.close(0u32.into(), b"done");
+}
+
+// =========================================================================
+// Hybrid connection reuse and allowlists
+// =========================================================================
+
+#[tokio::test]
+async fn hybrid_multiple_connections() {
+    let server_keypair = HybridKeyPair::generate(&mut OsRng);
+    let server_public = server_keypair.public.clone();
+    let server = hybrid_server_endpoint(make_hybrid_server_config(server_keypair));
+    let server_address = server.local_addr().unwrap();
+    let client = hybrid_client_endpoint();
+
+    for connection_index in 0u8..3 {
+        let client_keypair = HybridKeyPair::generate(&mut OsRng);
+        let client_config = make_hybrid_client_config(client_keypair, server_public.clone());
+        let connecting = client
+            .connect_with(client_config, server_address, "server")
+            .unwrap();
+
+        let (client_connection, server_connection) =
+            tokio::join!(async { connecting.await.unwrap() }, async {
+                server.accept().await.unwrap().await.unwrap()
+            },);
+
+        let mut send_stream = client_connection.open_uni().await.unwrap();
+        send_stream.write_all(&[connection_index; 8]).await.unwrap();
+        send_stream.finish().unwrap();
+
+        let mut receive_stream = server_connection.accept_uni().await.unwrap();
+        let data = receive_stream.read_to_end(64).await.unwrap();
+        assert_eq!(data, [connection_index; 8]);
+
+        client_connection.close(0u32.into(), b"done");
+        server_connection.close(0u32.into(), b"done");
+    }
+}
+
+#[tokio::test]
+async fn hybrid_allowlist_accepts_only_authenticated_client() {
+    let server_keypair = HybridKeyPair::generate(&mut OsRng);
+    let server_public = server_keypair.public.clone();
+    let client_keypair = HybridKeyPair::generate(&mut OsRng);
+    let client_public = client_keypair.public.clone();
+
+    let server = hybrid_server_endpoint(make_hybrid_server_config_with_allowed_keys(
+        server_keypair,
+        [client_public],
+    ));
+    let server_address = server.local_addr().unwrap();
+    let client = hybrid_client_endpoint();
+    let client_config = make_hybrid_client_config(client_keypair, server_public);
+    let connecting = client
+        .connect_with(client_config, server_address, "server")
+        .unwrap();
+
+    let (client_connection, server_connection) =
+        tokio::join!(async { connecting.await.unwrap() }, async {
+            server.accept().await.unwrap().await.unwrap()
+        },);
+
+    client_connection.close(0u32.into(), b"done");
+    server_connection.close(0u32.into(), b"done");
+}
+
+#[tokio::test]
+async fn hybrid_allowlist_rejects_unlisted_client() {
+    let server_keypair = HybridKeyPair::generate(&mut OsRng);
+    let server_public = server_keypair.public.clone();
+    let client_keypair = HybridKeyPair::generate(&mut OsRng);
+    let other_keypair = HybridKeyPair::generate(&mut OsRng);
+
+    let server = hybrid_server_endpoint(make_hybrid_server_config_with_allowed_keys(
+        server_keypair,
+        [other_keypair.public],
+    ));
+    let server_address = server.local_addr().unwrap();
+    let client = hybrid_client_endpoint();
+    let client_config = make_hybrid_client_config(client_keypair, server_public);
+    let connecting = client
+        .connect_with(client_config, server_address, "server")
+        .unwrap();
+
+    let server_task = tokio::spawn(async move {
+        if let Some(incoming) = server.accept().await {
+            let _ = incoming.await;
+        }
+    });
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), connecting).await;
+
+    match result {
+        Ok(Ok(_)) => panic!("hybrid connection should reject an unlisted client"),
+        Ok(Err(_)) => {}
+        Err(_) => panic!("timed out waiting for hybrid allowlist rejection"),
+    }
+
+    server_task.abort();
+}
+
+// =========================================================================
+// Suite and retired-version separation
+// =========================================================================
+
+#[tokio::test]
+async fn pq_builders_reject_cross_suite_and_retired_versions() {
+    const RETIRED_PQ_VERSION: u32 = 0x52510201;
+
+    // Advertise every candidate so rejection comes from the suite config,
+    // rather than the endpoint's version filter.
+    let mut endpoint_config = EndpointConfig::new(noise_hmac_key());
+    endpoint_config.supported_versions(vec![
+        REISHI_PQ_KEM_V1_QUIC_V1,
+        REISHI_PQ_HYBRID_V1_QUIC_V1,
+        RETIRED_PQ_VERSION,
+    ]);
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let runtime = quinn::default_runtime().unwrap();
+    let endpoint = Endpoint::new(endpoint_config, None, socket, runtime).unwrap();
+    let unused_address = "127.0.0.1:9".parse().unwrap();
+
+    let pq_server = PqKeyPair::generate(&mut OsRng);
+    let pq_client = PqKeyPair::generate(&mut OsRng);
+    let pq_noise = PqNoiseConfigBuilder::new(pq_client)
+        .with_remote_public(pq_server.public)
+        .build_client_config()
+        .unwrap();
+    let mut pq_config = ClientConfig::new(Arc::new(pq_noise));
+
+    pq_config.version(REISHI_PQ_HYBRID_V1_QUIC_V1);
+
+    let hybrid_server = HybridKeyPair::generate(&mut OsRng);
+    let hybrid_client = HybridKeyPair::generate(&mut OsRng);
+    let hybrid_noise = HybridNoiseConfigBuilder::new(hybrid_client)
+        .with_remote_public(hybrid_server.public)
+        .build_client_config()
+        .unwrap();
+    let mut hybrid_config = ClientConfig::new(Arc::new(hybrid_noise));
+
+    hybrid_config.version(REISHI_PQ_KEM_V1_QUIC_V1);
+
+    assert!(
+        endpoint
+            .connect_with(pq_config, unused_address, "server")
+            .is_err(),
+    );
+    assert!(
+        endpoint
+            .connect_with(hybrid_config, unused_address, "server")
+            .is_err(),
+    );
+
+    let retired_server = PqKeyPair::generate(&mut OsRng);
+    let retired_client = PqKeyPair::generate(&mut OsRng);
+    let retired_noise = PqNoiseConfigBuilder::new(retired_client)
+        .with_remote_public(retired_server.public)
+        .build_client_config()
+        .unwrap();
+    let mut retired_config = ClientConfig::new(Arc::new(retired_noise));
+
+    retired_config.version(RETIRED_PQ_VERSION);
+
+    assert!(
+        endpoint
+            .connect_with(retired_config, unused_address, "server")
+            .is_err(),
+    );
 }

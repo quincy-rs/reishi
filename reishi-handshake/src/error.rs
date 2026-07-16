@@ -9,7 +9,7 @@ pub enum Error {
     BufferTooSmall,
     /// An operation was attempted in the wrong handshake state.
     WrongState,
-    /// The handshake message is malformed or truncated.
+    /// A handshake or transport message is malformed, truncated, or oversized.
     BadMessage,
     /// The nonce counter has been exhausted (2^64 messages sent).
     NonceExhausted,
@@ -22,7 +22,7 @@ impl core::fmt::Display for Error {
             Self::BadKey => write!(f, "invalid public key"),
             Self::BufferTooSmall => write!(f, "output buffer too small"),
             Self::WrongState => write!(f, "operation not valid in current state"),
-            Self::BadMessage => write!(f, "malformed handshake message"),
+            Self::BadMessage => write!(f, "malformed or oversized message"),
             Self::NonceExhausted => write!(f, "nonce counter exhausted"),
         }
     }

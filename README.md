@@ -9,8 +9,8 @@
 
 A [Noise Protocol](https://noiseprotocol.org/noise.html) IK handshake for Rust, built for QUIC-based VPNs.
 
-- Fixed ciphersuites: `Noise_IK_25519_ChaChaPoly_BLAKE2s`, `Noise_IKpq_25519+MLKEM768_ChaChaPoly_BLAKE2s` (optional, behind `pq` feature)
-- One round trip, mutual authentication, no cipher negotiation
+- Fixed classical, KEM-only, and hybrid ciphersuites with no negotiation
+- Mutual authentication; confirmed PQ suites use an explicit third flight
 - Sans-IO core, protocol-agnostic
 - Ready-made [Quinn](https://github.com/quinn-rs/quinn) crypto provider
 

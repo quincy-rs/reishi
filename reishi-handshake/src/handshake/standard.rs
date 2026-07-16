@@ -11,7 +11,7 @@ use crate::symmetric_state::SymmetricState;
 /// The Noise protocol name for the fixed ciphersuite.
 pub const PROTOCOL_NAME: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 
-/// Maximum accepted handshake message size in bytes.
+/// Maximum handshake message size accepted or emitted, in bytes.
 ///
 /// Limits memory consumption from unauthenticated peers during handshake processing.
 /// This value (65535 = u16::MAX) provides ample room for legitimate handshake messages
@@ -208,9 +208,39 @@ impl Handshake {
         }
     }
 
-    /// Copy of the remote peer's static public key bytes, if known.
+    /// Whether the next outgoing message accepts an application payload.
+    pub fn next_message_accepts_payload(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::InitiatorWriteMsg1 | Phase::ResponderWriteMsg2
+        )
+    }
+
+    /// Copy the remote peer's authenticated static public key bytes.
+    ///
+    /// On a responder this becomes available after a valid Message 1. Noise IK
+    /// authenticates the source of that message, but Message 1 is replayable and
+    /// therefore does not prove peer freshness or liveness.
     pub fn remote_public_bytes(&self) -> Option<[u8; DH_LEN]> {
+        if !self.is_remote_authenticated() {
+            return None;
+        }
+
         self.rs
+    }
+
+    /// Report whether the remote peer has authenticated its static key.
+    ///
+    /// A responder returns `true` after Message 1, which proves that the message
+    /// originated from the static-key holder but not that it is fresh; Noise IK
+    /// Message 1 can be replayed. An initiator returns `true` only after reading
+    /// Message 2 and completing the handshake.
+    pub fn is_remote_authenticated(&self) -> bool {
+        if self.is_initiator {
+            self.phase == Phase::Complete
+        } else {
+            matches!(self.phase, Phase::ResponderWriteMsg2 | Phase::Complete)
+        }
     }
 
     /// The current handshake hash.
@@ -270,7 +300,12 @@ impl Handshake {
         let overhead = self.next_message_overhead();
         let total = overhead
             .checked_add(payload.len())
-            .ok_or(Error::BufferTooSmall)?;
+            .ok_or(Error::BadMessage)?;
+
+        if total > MAX_MESSAGE_LEN {
+            return Err(Error::BadMessage);
+        }
+
         if out.len() < total {
             return Err(Error::BufferTooSmall);
         }
@@ -315,6 +350,13 @@ impl Handshake {
         let min_len = DH_LEN + DH_LEN + AEAD_TAG_LEN + AEAD_TAG_LEN;
         if message.len() < min_len {
             return Err(Error::BadMessage);
+        }
+
+        let expected_payload_length = message.len() - min_len;
+
+        // Reject before processing tokens so the caller can retry safely.
+        if out.len() < expected_payload_length {
+            return Err(Error::BufferTooSmall);
         }
 
         let mut offset = 0;
@@ -368,7 +410,12 @@ impl Handshake {
         let overhead = self.next_message_overhead();
         let total = overhead
             .checked_add(payload.len())
-            .ok_or(Error::BufferTooSmall)?;
+            .ok_or(Error::BadMessage)?;
+
+        if total > MAX_MESSAGE_LEN {
+            return Err(Error::BadMessage);
+        }
+
         if out.len() < total {
             return Err(Error::BufferTooSmall);
         }
@@ -412,6 +459,13 @@ impl Handshake {
         let min_len = DH_LEN + AEAD_TAG_LEN;
         if message.len() < min_len {
             return Err(Error::BadMessage);
+        }
+
+        let expected_payload_length = message.len() - min_len;
+
+        // Reject before processing tokens so the caller can retry safely.
+        if out.len() < expected_payload_length {
+            return Err(Error::BufferTooSmall);
         }
 
         let mut offset = 0;

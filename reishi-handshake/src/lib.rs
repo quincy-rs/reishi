@@ -2,8 +2,8 @@
 
 //! # reishi-handshake
 //!
-//! A pure, sans-IO implementation of the Noise IK handshake pattern
-//! with a fixed ciphersuite: `Noise_IK_25519_ChaChaPoly_BLAKE2s`.
+//! Pure, sans-IO state machines for classical Noise IK and the optional
+//! confirmed KEM-only `pqIK` and hybrid IK + `pqIK` suites.
 //!
 //! ## Security Properties
 //!
@@ -29,6 +29,9 @@ pub use keys::{KeyPair, PublicKey, StaticSecret};
 pub use transport::TransportState;
 
 #[cfg(feature = "pq")]
-pub use handshake::{PQ_PROTOCOL_NAME, PqHandshake};
+pub use handshake::{HYBRID_PROTOCOL_NAME, HybridHandshake, PQ_PROTOCOL_NAME, PqHandshake};
 #[cfg(feature = "pq")]
-pub use keys::{EncapsulationKey, PqKeyPair, PqPublicKey, PqStaticSecret};
+pub use keys::{
+    EncapsulationKey, HybridKeyPair, HybridPublicKey, HybridStaticSecret, PqKeyPair, PqPublicKey,
+    PqStaticSecret,
+};

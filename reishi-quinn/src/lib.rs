@@ -2,7 +2,7 @@
 
 //! # reishi-quinn
 //!
-//! Integration of the [`reishi-handshake`] Noise IK handshake with
+//! Integration of the [`reishi_handshake`] Noise IK handshake with
 //! `quinn-proto`'s crypto traits, enabling Noise-over-QUIC.
 //!
 //! This crate provides:
@@ -49,10 +49,16 @@ pub mod pq_config;
 pub use reishi_handshake::{Error, KeyPair, PROTOCOL_NAME, PublicKey, StaticSecret};
 
 #[cfg(feature = "pq")]
-pub use reishi_handshake::{PQ_PROTOCOL_NAME, PqKeyPair, PqPublicKey, PqStaticSecret};
+pub use reishi_handshake::{
+    HYBRID_PROTOCOL_NAME, HybridKeyPair, HybridPublicKey, HybridStaticSecret, PQ_PROTOCOL_NAME,
+    PqKeyPair, PqPublicKey, PqStaticSecret,
+};
 
 #[cfg(feature = "pq")]
-pub use pq_config::{PqNoiseClientConfig, PqNoiseConfigBuilder, PqNoiseServerConfig};
+pub use pq_config::{
+    HybridNoiseClientConfig, HybridNoiseConfigBuilder, HybridNoiseServerConfig,
+    PqNoiseClientConfig, PqNoiseConfigBuilder, PqNoiseServerConfig,
+};
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -69,11 +75,13 @@ use quinn_proto::{ConnectError, ConnectionId, crypto};
 /// Encodes as `"RQ\x01\x01"` in the version field.
 pub const REISHI_V1_QUIC_V1: u32 = 0x52510101;
 
-/// Custom QUIC version number for Reishi PQ v1 over QUIC v1.
-///
-/// Encodes as `"RQ\x02\x01"` in the version field.
+/// Custom QUIC version number for Reishi KEM-only pqIK over QUIC v1.
 #[cfg(feature = "pq")]
-pub const REISHI_PQ_V1_QUIC_V1: u32 = 0x52510201;
+pub const REISHI_PQ_KEM_V1_QUIC_V1: u32 = 0x52510301;
+
+/// Custom QUIC version number for Reishi hybrid IK + pqIK over QUIC v1.
+#[cfg(feature = "pq")]
+pub const REISHI_PQ_HYBRID_V1_QUIC_V1: u32 = 0x52510401;
 
 /// Label used to derive initial-level secrets from the client's DCID.
 pub const INITIAL_LABEL: &[u8] = b"reishi initial";
@@ -96,19 +104,29 @@ pub const RESP_DATA_LABEL: &[u8] = b"resp data";
 /// ASK label used to extract the level secret from the Noise handshake.
 pub const ASK_LABEL: &[u8] = b"reishi key";
 
-/// Peer identity extracted after a successful Noise IK handshake.
+/// The authenticated peer key, typed by handshake suite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerPublicKey {
+    /// X25519 key authenticated by the classical Noise IK suite.
+    Classical(PublicKey),
+    #[cfg(feature = "pq")]
+    /// ML-KEM key authenticated by the KEM-only confirmed `pqIK` suite.
+    PostQuantum(PqPublicKey),
+    #[cfg(feature = "pq")]
+    /// X25519 + ML-KEM key authenticated by the confirmed hybrid suite.
+    Hybrid(HybridPublicKey),
+}
+
+/// Peer identity extracted after a successful handshake.
 ///
 /// Available via `Connection::peer_identity()` after the handshake completes.
 /// Downcast the `Box<dyn Any>` to this type.
 #[derive(Debug, Clone)]
 pub struct PeerIdentity {
-    /// The peer's static X25519 public key.
-    pub public_key: PublicKey,
+    /// The peer's authenticated static public key.
+    pub public_key: PeerPublicKey,
     /// The final Noise handshake hash (channel binding value, 32 bytes).
     pub handshake_hash: [u8; 32],
-    /// The peer's full hybrid PQ public key (if PQ handshake).
-    #[cfg(feature = "pq")]
-    pub pq_public_key: Option<reishi_handshake::PqPublicKey>,
 }
 
 /// Shared configuration for both client and server sessions.
@@ -237,8 +255,9 @@ impl NoiseConfigBuilder {
 
     /// Set a custom prologue for the handshake.
     ///
-    /// Both sides must use the same prologue for the handshake to succeed.
-    /// Defaults to empty.
+    /// Both sides must use the same prologue for the handshake to succeed. The
+    /// Quinn integration additionally binds the selected QUIC version. Defaults
+    /// to empty application context.
     pub fn with_prologue(mut self, prologue: Vec<u8>) -> Self {
         self.prologue = Some(prologue);
         self

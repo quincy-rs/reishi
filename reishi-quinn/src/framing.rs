@@ -44,15 +44,15 @@ impl HandshakeMessageFramer {
     /// Limits resource consumption from unauthenticated peers.
     ///
     /// Standard Noise IK messages are small (~96–144 bytes + payload), so 4096
-    /// is generous. When the `pq` feature is enabled, PQ IK Message 1 is ~4640
-    /// bytes plus transport parameters, requiring a higher limit.
+    /// is generous. When the `pq` feature is enabled, the largest fixed first
+    /// flight is 3536 bytes, requiring a higher limit.
     #[cfg(not(feature = "pq"))]
     pub const MESSAGE_LEN_MAX: usize = 4096;
 
     /// Maximum length of a single handshake message (PQ mode).
     ///
-    /// PQ IK Message 1 is ~4640 bytes + transport parameters payload, so 8192
-    /// provides adequate headroom.
+    /// PQ Message 1 carries no payload and is at most 3536 bytes. The larger
+    /// limit leaves room for transport parameters in Messages 2 and 3.
     #[cfg(feature = "pq")]
     pub const MESSAGE_LEN_MAX: usize = 8192;
 

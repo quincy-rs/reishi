@@ -1,6 +1,6 @@
 [package]
 name = "reishi-handshake"
-description = "Pure, sans-IO implementation of the Noise IK handshake with optional post-quantum hybrid mode"
+description = "Pure, sans-IO Noise IK, confirmed pqIK, and hybrid IK handshakes"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

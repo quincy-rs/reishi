@@ -36,7 +36,7 @@ pub fn hmac(key: &[u8; HASH_LEN], data: &[u8]) -> Zeroizing<[u8; HASH_LEN]> {
 /// HMAC-BLAKE2s over multiple data slices (fed sequentially to the hasher).
 ///
 /// Avoids concatenating inputs into a temporary buffer.
-fn hmac_multi(key: &[u8; HASH_LEN], parts: &[&[u8]]) -> Zeroizing<[u8; HASH_LEN]> {
+pub(crate) fn hmac_multi(key: &[u8; HASH_LEN], parts: &[&[u8]]) -> Zeroizing<[u8; HASH_LEN]> {
     const BLOCK_SIZE: usize = 64; // BLAKE2s block size
     const IPAD: u8 = 0x36;
     const OPAD: u8 = 0x5c;
