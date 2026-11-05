@@ -1,30 +1,21 @@
-//! ML-KEM-768 and the small KDF-SEEC profile used by the PQ handshakes.
+//! ML-KEM-768 through aws-lc-rs.
 //!
-//! The profile combines fresh session coins with an independent persistent
-//! secret using domain-separated HMAC-BLAKE2s and HKDF expansion. It protects
-//! predictable or exposed coins while that persistent key remains secret.
-//!
-//! NOTE: This stateless profile does not protect against maliciously chosen or
-//! repeating entropy. Upgrade to stateful or hardware-backed SEEC if that threat
-//! is in scope; strict PRP-SEEC would require a new wide-block primitive.
-//!
-//! NOTE: Reconstructing an ML-KEM decapsulation key expands secret material in
-//! memory. The required `ml-kem/zeroize` feature wipes that material on drop;
-//! keep the feature enabled and re-audit this assumption on dependency upgrades.
+//! Randomness for key generation and encapsulation comes from aws-lc's CSPRNG.
+//! Static keys persist as the FIPS 203 expanded decapsulation key because
+//! aws-lc-rs cannot import 64-byte seeds.
 
-use ml_kem::kem::{Decapsulate, KeyExport};
-use ml_kem::{B32, MlKem768, Seed};
-use rand_core::CryptoRngCore;
+use aws_lc_rs::digest;
+use aws_lc_rs::kem::{self, AlgorithmId, Ciphertext, ML_KEM_768};
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::crypto::hash;
 use crate::error::Error;
 
 /// Serialized length of an ML-KEM-768 encapsulation key.
 pub const KEM_EK_LEN: usize = 1184;
 
-/// Serialized length of the seed used to reconstruct an ML-KEM-768 secret key.
-pub const KEM_SEED_LEN: usize = 64;
+/// Serialized length of an ML-KEM-768 expanded decapsulation key (FIPS 203).
+pub const KEM_DK_LEN: usize = 2400;
 
 /// Serialized length of an ML-KEM-768 ciphertext.
 pub const KEM_CT_LEN: usize = 1088;
@@ -32,20 +23,14 @@ pub const KEM_CT_LEN: usize = 1088;
 /// Length of an ML-KEM-768 shared secret.
 pub const KEM_SS_LEN: usize = 32;
 
-/// Domain separator for the local KDF-SEEC construction.
-const SEEC_DOMAIN: &[u8] = b"reishi KDF-SEEC v1";
+/// Offset of `ek` inside the FIPS 203 dk layout `dk_PKE(1152) || ek(1184) || H(ek)(32) || z(32)`.
+const KEM_DK_EK_OFFSET: usize = 1152;
 
-/// HKDF expansion label applied after the HMAC-BLAKE2s extraction step.
-const SEEC_EXPAND_INFO: &[u8] = b"reishi KDF-SEEC output";
+/// Offset of the stored `H(ek)` inside the expanded decapsulation key.
+const KEM_DK_HASH_OFFSET: usize = KEM_DK_EK_OFFSET + KEM_EK_LEN;
 
-/// Purpose label used only for ephemeral ML-KEM key generation.
-const EPHEMERAL_KEM_PURPOSE: &[u8] = b"ephemeral-key-generation";
-
-/// Purpose label used only for ephemeral X25519 secret generation.
-const EPHEMERAL_DH_PURPOSE: &[u8] = b"ephemeral-dh-key-generation";
-
-/// Purpose label used only for ML-KEM encapsulation.
-const ENCAPSULATION_PURPOSE: &[u8] = b"encapsulation";
+/// Length of the stored `H(ek)` (SHA3-256).
+const KEM_DK_HASH_LEN: usize = 32;
 
 /// Zeroizing shared secret returned by ML-KEM encapsulation or decapsulation.
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -56,148 +41,117 @@ impl KemSharedSecret {
     pub fn as_bytes(&self) -> &[u8; KEM_SS_LEN] {
         &self.0
     }
+
+    /// Copy an aws-lc shared secret into zeroizing storage.
+    fn from_slice(bytes: &[u8]) -> Result<Self, Error> {
+        let mut shared_secret = [0u8; KEM_SS_LEN];
+        if bytes.len() != KEM_SS_LEN {
+            return Err(Error::CryptoFailed);
+        }
+        shared_secret.copy_from_slice(bytes);
+        Ok(Self(shared_secret))
+    }
 }
 
-/// Static ML-KEM generation deliberately uses the caller's secure RNG directly.
-pub fn kem_generate(
-    rng: &mut impl CryptoRngCore,
-) -> (Zeroizing<[u8; KEM_SEED_LEN]>, [u8; KEM_EK_LEN]) {
-    let mut seed = Zeroizing::new([0u8; KEM_SEED_LEN]);
-    rng.fill_bytes(&mut *seed);
+/// Generate a static ML-KEM-768 keypair as `(expanded_dk, ek)`.
+pub fn kem_generate() -> (Zeroizing<[u8; KEM_DK_LEN]>, [u8; KEM_EK_LEN]) {
+    let key = kem::DecapsulationKey::generate(&ML_KEM_768).expect("aws-lc ML-KEM keygen failed");
+    let key_bytes = key
+        .key_bytes()
+        .expect("aws-lc exports every generated ML-KEM key");
 
-    let encapsulation_key = kem_ek_from_seed(&seed);
+    let mut dk = Zeroizing::new([0u8; KEM_DK_LEN]);
+    dk.copy_from_slice(key_bytes.as_ref());
+    let ek = kem_ek_from_dk(&dk);
 
-    (seed, encapsulation_key)
+    (dk, ek)
 }
 
-/// Reconstruct the public encapsulation key belonging to an ML-KEM seed.
-pub fn kem_ek_from_seed(seed_bytes: &[u8; KEM_SEED_LEN]) -> [u8; KEM_EK_LEN] {
-    let seed: Seed = (*seed_bytes).into();
-    let decapsulation_key = ml_kem::DecapsulationKey::<MlKem768>::from_seed(seed);
-    let exported_key = decapsulation_key.encapsulation_key().to_bytes();
-    let mut encapsulation_key = [0u8; KEM_EK_LEN];
-
-    encapsulation_key.copy_from_slice(exported_key.as_slice());
-
-    encapsulation_key
+/// Extract the encapsulation key embedded in an expanded decapsulation key.
+pub fn kem_ek_from_dk(dk: &[u8; KEM_DK_LEN]) -> [u8; KEM_EK_LEN] {
+    let mut ek = [0u8; KEM_EK_LEN];
+    ek.copy_from_slice(&dk[KEM_DK_EK_OFFSET..KEM_DK_HASH_OFFSET]);
+    ek
 }
 
-/// Generate an ephemeral ML-KEM keypair with hardened session coins.
-pub(crate) fn kem_generate_ephemeral(
-    seec_key: &[u8; 32],
-    suite: &str,
-    rng: &mut impl CryptoRngCore,
-) -> (Zeroizing<[u8; KEM_SEED_LEN]>, [u8; KEM_EK_LEN]) {
-    let seed = seec_random::<KEM_SEED_LEN>(seec_key, suite, EPHEMERAL_KEM_PURPOSE, rng);
-    let encapsulation_key = kem_ek_from_seed(&seed);
-
-    (seed, encapsulation_key)
+/// Import an expanded decapsulation key into aws-lc.
+///
+/// Only checks the length; use [`kem_validate_dk`] for untrusted input.
+pub(crate) fn kem_decapsulation_key(
+    dk: &[u8; KEM_DK_LEN],
+) -> Result<kem::DecapsulationKey<AlgorithmId>, Error> {
+    kem::DecapsulationKey::new(&ML_KEM_768, &dk[..]).map_err(|_| Error::BadKey)
 }
 
-/// Generate a suite-bound X25519 ephemeral secret from hardened session coins.
-pub(crate) fn seec_ephemeral_dh_secret(
-    seec_key: &[u8; 32],
-    suite: &str,
-    rng: &mut impl CryptoRngCore,
-) -> Zeroizing<[u8; 32]> {
-    seec_random::<32>(seec_key, suite, EPHEMERAL_DH_PURPOSE, rng)
+/// Reject an imported expanded ML-KEM-768 key that is internally inconsistent.
+///
+/// Runs the FIPS 203 §7.3 hash check (stored H(ek) == SHA3-256(ek)) and one pairwise
+/// consistency test: encapsulate to the embedded ek, decapsulate with the key, and compare.
+/// This catches corrupted, truncated-and-padded or mixed-up key files at load time.
+pub(crate) fn kem_validate_dk(dk: &[u8; KEM_DK_LEN]) -> Result<(), Error> {
+    let ek_hash = digest::digest(&digest::SHA3_256, &dk[KEM_DK_EK_OFFSET..KEM_DK_HASH_OFFSET]);
+    if ek_hash.as_ref() != &dk[KEM_DK_HASH_OFFSET..KEM_DK_HASH_OFFSET + KEM_DK_HASH_LEN] {
+        return Err(Error::BadKey);
+    }
+
+    let ek = kem_ek_from_dk(dk);
+    let key = kem_decapsulation_key(dk)?;
+    let (ciphertext, sent) = kem_encapsulate(&ek).map_err(|_| Error::BadKey)?;
+    let received = kem_decapsulate(&key, &ciphertext).map_err(|_| Error::BadKey)?;
+    if !bool::from(sent.as_bytes().ct_eq(received.as_bytes())) {
+        return Err(Error::BadKey);
+    }
+
+    Ok(())
 }
 
-/// Encapsulate with hardened session coins bound to the selected suite.
+/// Generate an ephemeral ML-KEM keypair, returning the aws-lc key and its ek bytes.
+pub(crate) fn kem_generate_ephemeral()
+-> Result<(kem::DecapsulationKey<AlgorithmId>, [u8; KEM_EK_LEN]), Error> {
+    let key = kem::DecapsulationKey::generate(&ML_KEM_768).map_err(|_| Error::CryptoFailed)?;
+    let ek_bytes = key
+        .encapsulation_key()
+        .and_then(|ek| ek.key_bytes())
+        .map_err(|_| Error::CryptoFailed)?;
+    let ek = ek_bytes
+        .as_ref()
+        .try_into()
+        .map_err(|_| Error::CryptoFailed)?;
+
+    Ok((key, ek))
+}
+
+/// Encapsulate to a remote ML-KEM-768 encapsulation key.
+///
+/// Returns `Error::BadKey` for malformed keys; aws-lc runs the FIPS 203 §7.2
+/// modulus check during encapsulation.
 pub(crate) fn kem_encapsulate(
-    remote_encapsulation_key: &[u8; KEM_EK_LEN],
-    seec_key: &[u8; 32],
-    suite: &str,
-    rng: &mut impl CryptoRngCore,
+    remote: &[u8; KEM_EK_LEN],
 ) -> Result<([u8; KEM_CT_LEN], KemSharedSecret), Error> {
-    let randomness = seec_random::<32>(seec_key, suite, ENCAPSULATION_PURPOSE, rng);
+    let key = kem::EncapsulationKey::new(&ML_KEM_768, remote).map_err(|_| Error::BadKey)?;
+    let (ciphertext, shared_secret) = key.encapsulate().map_err(|_| Error::BadKey)?;
 
-    kem_encapsulate_deterministic(remote_encapsulation_key, &randomness)
+    let ciphertext = ciphertext
+        .as_ref()
+        .try_into()
+        .map_err(|_| Error::CryptoFailed)?;
+
+    Ok((
+        ciphertext,
+        KemSharedSecret::from_slice(shared_secret.as_ref())?,
+    ))
 }
 
-/// Perform deterministic ML-KEM encapsulation with already-hardened randomness.
-fn kem_encapsulate_deterministic(
-    remote_encapsulation_key: &[u8; KEM_EK_LEN],
-    randomness: &[u8; 32],
-) -> Result<([u8; KEM_CT_LEN], KemSharedSecret), Error> {
-    let encapsulation_key =
-        ml_kem::EncapsulationKey::<MlKem768>::new(remote_encapsulation_key.into())
-            .map_err(|_| Error::BadKey)?;
-    let encapsulation_randomness: &B32 = randomness.into();
-    let (ciphertext, mut ml_kem_shared_secret) =
-        encapsulation_key.encapsulate_deterministic(encapsulation_randomness);
-
-    let mut ciphertext_bytes = [0u8; KEM_CT_LEN];
-    ciphertext_bytes.copy_from_slice(ciphertext.as_slice());
-
-    let mut shared_secret = [0u8; KEM_SS_LEN];
-    shared_secret.copy_from_slice(ml_kem_shared_secret.as_slice());
-
-    ml_kem_shared_secret.zeroize();
-
-    Ok((ciphertext_bytes, KemSharedSecret(shared_secret)))
-}
-
-/// Recover an ML-KEM shared secret from a ciphertext and static or ephemeral seed.
+/// Recover an ML-KEM shared secret from a ciphertext and static or ephemeral key.
 pub(crate) fn kem_decapsulate(
-    decapsulation_seed: &[u8; KEM_SEED_LEN],
+    dk: &kem::DecapsulationKey<AlgorithmId>,
     ciphertext: &[u8; KEM_CT_LEN],
 ) -> Result<KemSharedSecret, Error> {
-    let seed: Seed = (*decapsulation_seed).into();
-    let decapsulation_key = ml_kem::DecapsulationKey::<MlKem768>::from_seed(seed);
-    let ciphertext = ml_kem::kem::Ciphertext::<MlKem768>::try_from(ciphertext.as_slice())
-        .map_err(|_| Error::BadMessage)?;
-    let mut ml_kem_shared_secret = decapsulation_key.decapsulate(&ciphertext);
+    let shared_secret = dk
+        .decapsulate(Ciphertext::from(&ciphertext[..]))
+        .map_err(|_| Error::CryptoFailed)?;
 
-    let mut shared_secret = [0u8; KEM_SS_LEN];
-    shared_secret.copy_from_slice(ml_kem_shared_secret.as_slice());
-
-    ml_kem_shared_secret.zeroize();
-
-    Ok(KemSharedSecret(shared_secret))
-}
-
-/// Draw fresh coins and harden them for one suite-specific cryptographic purpose.
-fn seec_random<const N: usize>(
-    seec_key: &[u8; 32],
-    suite: &str,
-    purpose: &[u8],
-    rng: &mut impl CryptoRngCore,
-) -> Zeroizing<[u8; N]> {
-    let mut coins = Zeroizing::new([0u8; 32]);
-    rng.fill_bytes(&mut *coins);
-
-    seec_derive(seec_key, suite, purpose, &coins)
-}
-
-/// Derive deterministic KDF-SEEC output for a fixed key, suite, purpose, and coins.
-fn seec_derive<const N: usize>(
-    seec_key: &[u8; 32],
-    suite: &str,
-    purpose: &[u8],
-    coins: &[u8; 32],
-) -> Zeroizing<[u8; N]> {
-    let separators = [0u8];
-    let prk = hash::hmac_multi(
-        seec_key,
-        &[
-            SEEC_DOMAIN,
-            &separators,
-            suite.as_bytes(),
-            &separators,
-            purpose,
-            &separators,
-            coins,
-        ],
-    );
-
-    let mut output = Zeroizing::new([0u8; N]);
-    assert!(
-        hash::hkdf_expand(&prk, SEEC_EXPAND_INFO, &mut *output),
-        "KDF-SEEC output exceeds the HKDF expansion limit",
-    );
-
-    output
+    KemSharedSecret::from_slice(shared_secret.as_ref())
 }
 
 #[cfg(test)]
@@ -205,77 +159,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kem_round_trip() {
-        let (decapsulation_seed, encapsulation_key) = kem_generate(&mut rand_core::OsRng);
-        let (ciphertext, sent_secret) = kem_encapsulate(
-            &encapsulation_key,
-            &[7u8; 32],
-            "test-suite",
-            &mut rand_core::OsRng,
-        )
-        .unwrap();
-        let received_secret = kem_decapsulate(&decapsulation_seed, &ciphertext).unwrap();
-
-        assert_eq!(sent_secret.as_bytes(), received_secret.as_bytes());
-    }
-
-    #[test]
-    fn seec_separates_static_key_coins_suite_and_purpose() {
-        let static_seec_key = [1u8; 32];
-        let other_static_seec_key = [3u8; 32];
-        let coins = [2u8; 32];
-        let other_coins = [4u8; 32];
-        let baseline = seec_derive::<64>(&static_seec_key, "pq", EPHEMERAL_KEM_PURPOSE, &coins);
-
-        assert_ne!(
-            *baseline,
-            *seec_derive::<64>(&other_static_seec_key, "pq", EPHEMERAL_KEM_PURPOSE, &coins,),
-        );
-
-        assert_ne!(
-            *baseline,
-            *seec_derive::<64>(&static_seec_key, "pq", EPHEMERAL_KEM_PURPOSE, &other_coins,),
-        );
-
-        assert_ne!(
-            *baseline,
-            *seec_derive::<64>(&static_seec_key, "hybrid", EPHEMERAL_KEM_PURPOSE, &coins,),
-        );
-
-        assert_ne!(
-            &baseline[..32],
-            &seec_derive::<32>(&static_seec_key, "pq", ENCAPSULATION_PURPOSE, &coins,)[..],
-        );
-
-        assert_ne!(
-            &baseline[..32],
-            &seec_derive::<32>(&static_seec_key, "pq", EPHEMERAL_DH_PURPOSE, &coins)[..],
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "KDF-SEEC output exceeds the HKDF expansion limit")]
-    fn seec_rejects_oversized_output() {
-        let _ = seec_derive::<8161>(&[1u8; 32], "pq", EPHEMERAL_KEM_PURPOSE, &[2u8; 32]);
-    }
-
-    #[test]
-    fn seec_fixed_vector() {
-        let output = seec_derive::<64>(
-            &[0x11u8; 32],
-            "Noise_pqIKkc_MLKEM768_ChaChaPoly_BLAKE2s",
-            EPHEMERAL_KEM_PURPOSE,
-            &[0x22u8; 32],
-        );
+    fn restored_expanded_key_round_trips() {
+        let key = kem::DecapsulationKey::generate(&ML_KEM_768).unwrap();
+        let dk_bytes: [u8; KEM_DK_LEN] = key.key_bytes().unwrap().as_ref().try_into().unwrap();
+        let ek = kem_ek_from_dk(&dk_bytes);
 
         assert_eq!(
-            *output,
-            [
-                65, 119, 121, 220, 145, 102, 164, 44, 68, 50, 237, 112, 39, 116, 187, 244, 221,
-                198, 172, 1, 224, 235, 252, 233, 142, 228, 216, 208, 228, 90, 50, 11, 85, 193, 177,
-                132, 139, 176, 39, 126, 240, 48, 63, 240, 122, 128, 170, 16, 196, 86, 155, 217,
-                176, 213, 68, 1, 183, 121, 148, 237, 20, 187, 224, 11,
-            ],
+            ek[..],
+            *key.encapsulation_key()
+                .unwrap()
+                .key_bytes()
+                .unwrap()
+                .as_ref()
         );
+
+        let restored = kem_decapsulation_key(&dk_bytes).unwrap();
+        let (ciphertext, sent) = kem_encapsulate(&ek).unwrap();
+        let received = kem_decapsulate(&restored, &ciphertext).unwrap();
+        assert_eq!(sent.as_bytes(), received.as_bytes());
+    }
+
+    #[test]
+    fn malformed_encapsulation_key_is_rejected() {
+        // Every 12-bit coefficient decodes to 4095 >= q = 3329.
+        assert_eq!(
+            kem_encapsulate(&[0xFF; KEM_EK_LEN]).err(),
+            Some(Error::BadKey)
+        );
+    }
+
+    #[test]
+    fn validate_rejects_inconsistent_expanded_keys() {
+        let (dk, _) = kem_generate();
+        assert_eq!(kem_validate_dk(&dk), Ok(()));
+
+        let mut ek_tampered = *dk;
+        ek_tampered[KEM_DK_EK_OFFSET] ^= 1;
+        assert_eq!(kem_validate_dk(&ek_tampered), Err(Error::BadKey));
+
+        // Inside dk_PKE: passes the hash check, fails the pairwise test via implicit rejection.
+        let mut pke_tampered = *dk;
+        pke_tampered[0] ^= 1;
+        assert_eq!(kem_validate_dk(&pke_tampered), Err(Error::BadKey));
     }
 }

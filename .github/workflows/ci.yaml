@@ -14,6 +14,9 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     runs-on: ${{ matrix.os }}
+    env:
+      # Lets aws-lc-sys build on windows-latest without a NASM install; ignored elsewhere.
+      AWS_LC_SYS_PREBUILT_NASM: "1"
     steps:
       - uses: actions/checkout@v4
         name: Checkout repository

@@ -3,7 +3,8 @@
 pub enum Error {
     /// A cryptographic operation failed (e.g., AEAD decryption, bad DH output).
     CryptoFailed,
-    /// A public key is invalid (low-order point, wrong length, etc.).
+    /// A key is invalid (low-order public key, malformed encoding, or an
+    /// internally inconsistent imported secret key).
     BadKey,
     /// The provided output buffer is too small.
     BufferTooSmall,
@@ -19,7 +20,7 @@ impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::CryptoFailed => write!(f, "cryptographic operation failed"),
-            Self::BadKey => write!(f, "invalid public key"),
+            Self::BadKey => write!(f, "invalid key"),
             Self::BufferTooSmall => write!(f, "output buffer too small"),
             Self::WrongState => write!(f, "operation not valid in current state"),
             Self::BadMessage => write!(f, "malformed or oversized message"),

@@ -13,7 +13,7 @@ use crate::{INIT_DATA_LABEL, INIT_HP_LABEL, INITIAL_LABEL, RESP_DATA_LABEL, RESP
 /// destination CID.
 ///
 /// Analogous to TLS 1.3's `initial_secret` derivation, but uses
-/// HKDF-BLAKE2s with the label `"reishi initial"`. The version is
+/// HKDF-SHA512 with the label `"reishi initial"`. The version is
 /// mixed into the IKM to provide domain separation between standard
 /// and PQ modes.
 pub fn initial_level_secret(version: u32, client_dcid: &[u8]) -> [u8; HASH_LEN] {
@@ -73,11 +73,11 @@ pub fn retry_integrity_key() -> [u8; HASH_LEN] {
     reishi_handshake::crypto::hash::hash(crate::RETRY_LABEL)
 }
 
-/// Compute a retry tag for the given packet using HMAC-BLAKE2s.
+/// Compute a retry tag for the given packet using HMAC-SHA512.
 ///
 /// Constructs a pseudo-packet by prepending the length-prefixed
 /// original destination connection ID to `packet`, then computes
-/// HMAC-BLAKE2s over the pseudo-packet using the well-known retry
+/// HMAC-SHA512 over the pseudo-packet using the well-known retry
 /// integrity key. Returns the first 16 bytes as the retry tag.
 ///
 /// Uses HMAC rather than AEAD to avoid nonce-reuse vulnerabilities

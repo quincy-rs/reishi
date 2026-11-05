@@ -10,6 +10,7 @@ use crate::error::Error;
 /// Per Noise spec Section 5.2.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SymmetricState {
+    #[zeroize(skip)]
     cipher: CipherState,
     /// Chaining key (ck) — mixed with DH outputs via HKDF.
     ck: Zeroizing<[u8; HASH_LEN]>,
@@ -48,10 +49,11 @@ impl SymmetricState {
         let (new_ck, temp_k) = hash::hkdf2(&self.ck, input_key_material);
         *self.ck = *new_ck;
 
-        let mut key = [0u8; AEAD_KEY_LEN];
-        key.copy_from_slice(&*temp_k);
-        self.cipher.initialize_key(key);
-        key.zeroize();
+        self.cipher.initialize_key(
+            temp_k
+                .first_chunk::<AEAD_KEY_LEN>()
+                .expect("HASH_LEN is at least AEAD_KEY_LEN"),
+        );
     }
 
     /// Mix data into the handshake hash.
@@ -89,16 +91,18 @@ impl SymmetricState {
         let (temp_k1, temp_k2) = hash::hkdf2(&self.ck, &[]);
 
         let mut c1 = CipherState::empty();
-        let mut key1 = [0u8; AEAD_KEY_LEN];
-        key1.copy_from_slice(&*temp_k1);
-        c1.initialize_key(key1);
-        key1.zeroize();
+        c1.initialize_key(
+            temp_k1
+                .first_chunk::<AEAD_KEY_LEN>()
+                .expect("HASH_LEN is at least AEAD_KEY_LEN"),
+        );
 
         let mut c2 = CipherState::empty();
-        let mut key2 = [0u8; AEAD_KEY_LEN];
-        key2.copy_from_slice(&*temp_k2);
-        c2.initialize_key(key2);
-        key2.zeroize();
+        c2.initialize_key(
+            temp_k2
+                .first_chunk::<AEAD_KEY_LEN>()
+                .expect("HASH_LEN is at least AEAD_KEY_LEN"),
+        );
 
         let h = self.h;
         (h, c1, c2)

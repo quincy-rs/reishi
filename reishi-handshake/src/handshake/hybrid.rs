@@ -8,23 +8,23 @@
 //! -> ENC(confirm, payload_i)
 //! ```
 
-use rand_core::{CryptoRngCore, OsRng};
-use x25519_dalek::{PublicKey as DalekPublicKey, StaticSecret as DalekStaticSecret};
+use aws_lc_rs::agreement::PrivateKey;
+use aws_lc_rs::kem::{self, AlgorithmId};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::aead::AEAD_TAG_LEN;
 use crate::crypto::hash::{self, HASH_LEN};
-use crate::crypto::pq::{self, KEM_CT_LEN, KEM_EK_LEN, KEM_SEED_LEN};
+use crate::crypto::pq::{self, KEM_CT_LEN, KEM_EK_LEN};
 use crate::crypto::x25519::{self, DH_LEN};
 use crate::error::Error;
 use crate::handshake::standard::HandshakeAction;
+use crate::keys::PublicKey;
 use crate::keys::pq::{EncapsulationKey, HybridKeyPair, HybridPublicKey};
-use crate::keys::{PublicKey, StaticSecret};
 use crate::symmetric_state::SymmetricState;
 use crate::transport::TransportState;
 
 /// Transcript name for the fixed confirmed hybrid ciphersuite.
-pub const HYBRID_PROTOCOL_NAME: &str = "Noise_hybridIKkc_25519+MLKEM768_ChaChaPoly_BLAKE2s";
+pub const HYBRID_PROTOCOL_NAME: &str = "Noise_hybridIKkc_25519+MLKEM768_ChaChaPoly_SHA512";
 /// Largest handshake message accepted or emitted by the state machine.
 pub const MAX_MESSAGE_LEN: usize = 65535;
 
@@ -58,17 +58,16 @@ pub struct HybridHandshake {
     is_initiator: bool,
     remote_authenticated: bool,
 
-    static_dh: StaticSecret,
+    static_dh: PrivateKey,
     static_dh_public: [u8; DH_LEN],
     remote_static_dh_public: Option<[u8; DH_LEN]>,
-    ephemeral_dh: Option<StaticSecret>,
+    ephemeral_dh: Option<PrivateKey>,
     remote_ephemeral_dh_public: Option<[u8; DH_LEN]>,
 
-    static_kem_seed: Zeroizing<[u8; KEM_SEED_LEN]>,
+    static_kem: kem::DecapsulationKey<AlgorithmId>,
     static_kem_public: [u8; KEM_EK_LEN],
-    seec_key: Zeroizing<[u8; 32]>,
     remote_static_kem_public: Option<[u8; KEM_EK_LEN]>,
-    ephemeral_kem_seed: Option<Zeroizing<[u8; KEM_SEED_LEN]>>,
+    ephemeral_kem: Option<kem::DecapsulationKey<AlgorithmId>>,
     remote_ephemeral_kem_public: Option<[u8; KEM_EK_LEN]>,
 }
 
@@ -112,16 +111,15 @@ impl HybridHandshake {
             phase: Phase::InitiatorWriteMessage1,
             is_initiator: true,
             remote_authenticated: false,
-            static_dh: local.secret.dh.clone(),
+            static_dh: local.secret.dh.private_key()?,
             static_dh_public: *local.public.dh.as_bytes(),
             remote_static_dh_public: Some(*remote_public.dh.as_bytes()),
             ephemeral_dh: None,
             remote_ephemeral_dh_public: None,
-            static_kem_seed: local.secret.kem_seed.clone(),
+            static_kem: pq::kem_decapsulation_key(&local.secret.kem_dk)?,
             static_kem_public: *local.public.kem_ek.as_bytes(),
-            seec_key: local.secret.seec_key.clone(),
             remote_static_kem_public: Some(*remote_public.kem_ek.as_bytes()),
-            ephemeral_kem_seed: None,
+            ephemeral_kem: None,
             remote_ephemeral_kem_public: None,
         })
     }
@@ -138,16 +136,15 @@ impl HybridHandshake {
             phase: Phase::ResponderReadMessage1,
             is_initiator: false,
             remote_authenticated: false,
-            static_dh: local.secret.dh.clone(),
+            static_dh: local.secret.dh.private_key()?,
             static_dh_public: *local.public.dh.as_bytes(),
             remote_static_dh_public: None,
             ephemeral_dh: None,
             remote_ephemeral_dh_public: None,
-            static_kem_seed: local.secret.kem_seed.clone(),
+            static_kem: pq::kem_decapsulation_key(&local.secret.kem_dk)?,
             static_kem_public: *local.public.kem_ek.as_bytes(),
-            seec_key: local.secret.seec_key.clone(),
             remote_static_kem_public: None,
-            ephemeral_kem_seed: None,
+            ephemeral_kem: None,
             remote_ephemeral_kem_public: None,
         })
     }
@@ -180,24 +177,11 @@ impl HybridHandshake {
         )
     }
 
-    /// Write the next handshake flight using the operating system RNG.
+    /// Write the next handshake flight; randomness comes from aws-lc's CSPRNG.
     pub fn write_message(&mut self, payload: &[u8], output: &mut [u8]) -> Result<usize, Error> {
-        self.write_message_with_rng(payload, output, &mut OsRng)
-    }
-
-    /// Write the next handshake flight using caller-supplied session coins.
-    ///
-    /// ML-KEM coins and X25519 ephemeral secrets are hardened with the
-    /// keypair's persistent SEEC key.
-    pub fn write_message_with_rng(
-        &mut self,
-        payload: &[u8],
-        output: &mut [u8],
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<usize, Error> {
         match self.phase {
-            Phase::InitiatorWriteMessage1 => self.write_message_1(payload, output, rng),
-            Phase::ResponderWriteMessage2 => self.write_message_2(payload, output, rng),
+            Phase::InitiatorWriteMessage1 => self.write_message_1(payload, output),
+            Phase::ResponderWriteMessage2 => self.write_message_2(payload, output),
             Phase::InitiatorWriteMessage3 => self.write_message_3(payload, output),
             _ => Err(Error::WrongState),
         }
@@ -295,12 +279,7 @@ impl HybridHandshake {
     }
 
     /// Write the hybrid Message 1 tokens without application payload.
-    fn write_message_1(
-        &mut self,
-        payload: &[u8],
-        output: &mut [u8],
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<usize, Error> {
+    fn write_message_1(&mut self, payload: &[u8], output: &mut [u8]) -> Result<usize, Error> {
         if !payload.is_empty() {
             return Err(Error::WrongState);
         }
@@ -310,37 +289,28 @@ impl HybridHandshake {
         }
 
         let remote_static_kem = self.remote_static_kem_public.ok_or(Error::WrongState)?;
-        let (static_kem_ciphertext, static_kem_secret) = pq::kem_encapsulate(
-            &remote_static_kem,
-            &self.seec_key,
-            HYBRID_PROTOCOL_NAME,
-            rng,
-        )?;
+        let (static_kem_ciphertext, static_kem_secret) = pq::kem_encapsulate(&remote_static_kem)?;
 
         output[..KEM_CT_LEN].copy_from_slice(&static_kem_ciphertext);
         self.symmetric()?.mix_hash(&static_kem_ciphertext);
         self.symmetric()?.mix_key(static_kem_secret.as_bytes());
 
         let dh_offset = KEM_CT_LEN;
-        let ephemeral_dh_bytes =
-            pq::seec_ephemeral_dh_secret(&self.seec_key, HYBRID_PROTOCOL_NAME, rng);
-        let ephemeral_dh = DalekStaticSecret::from(*ephemeral_dh_bytes);
-        let ephemeral_dh_public = DalekPublicKey::from(&ephemeral_dh).to_bytes();
+        let (ephemeral_dh, ephemeral_dh_public) = x25519::generate_keypair()?;
 
         output[dh_offset..dh_offset + DH_LEN].copy_from_slice(&ephemeral_dh_public);
         self.symmetric()?.mix_hash(&ephemeral_dh_public);
-        self.ephemeral_dh = Some(StaticSecret::from_dalek(ephemeral_dh));
+        self.ephemeral_dh = Some(ephemeral_dh);
 
         let remote_static_dh = self.remote_static_dh_public.ok_or(Error::WrongState)?;
         let es_secret = x25519::dh(
-            self.ephemeral_dh.as_ref().ok_or(Error::WrongState)?.inner(),
-            &DalekPublicKey::from(remote_static_dh),
+            self.ephemeral_dh.as_ref().ok_or(Error::WrongState)?,
+            &remote_static_dh,
         )?;
         self.symmetric()?.mix_key(es_secret.as_bytes());
 
-        let (ephemeral_kem_seed, ephemeral_kem_public) =
-            pq::kem_generate_ephemeral(&self.seec_key, HYBRID_PROTOCOL_NAME, rng);
-        self.ephemeral_kem_seed = Some(ephemeral_kem_seed);
+        let (ephemeral_kem, ephemeral_kem_public) = pq::kem_generate_ephemeral()?;
+        self.ephemeral_kem = Some(ephemeral_kem);
 
         let mut initiator_keys = Zeroizing::new([0u8; KEM_EK_LEN + DH_LEN + KEM_EK_LEN]);
         initiator_keys[..KEM_EK_LEN].copy_from_slice(&ephemeral_kem_public);
@@ -356,10 +326,7 @@ impl HybridHandshake {
             return Err(Error::CryptoFailed);
         }
 
-        let ss_secret = x25519::dh(
-            self.static_dh.inner(),
-            &DalekPublicKey::from(remote_static_dh),
-        )?;
+        let ss_secret = x25519::dh(&self.static_dh, &remote_static_dh)?;
         self.symmetric()?.mix_key(ss_secret.as_bytes());
 
         self.phase = Phase::InitiatorReadMessage2;
@@ -378,7 +345,7 @@ impl HybridHandshake {
 
         self.symmetric()?.mix_hash(&static_kem_ciphertext);
 
-        let static_kem_secret = pq::kem_decapsulate(&self.static_kem_seed, &static_kem_ciphertext)?;
+        let static_kem_secret = pq::kem_decapsulate(&self.static_kem, &static_kem_ciphertext)?;
         self.symmetric()?.mix_key(static_kem_secret.as_bytes());
 
         let dh_offset = KEM_CT_LEN;
@@ -388,10 +355,7 @@ impl HybridHandshake {
         self.symmetric()?.mix_hash(&remote_ephemeral_dh);
         self.remote_ephemeral_dh_public = Some(remote_ephemeral_dh);
 
-        let es_secret = x25519::dh(
-            self.static_dh.inner(),
-            &DalekPublicKey::from(remote_ephemeral_dh),
-        )?;
+        let es_secret = x25519::dh(&self.static_dh, &remote_ephemeral_dh)?;
         self.symmetric()?.mix_key(es_secret.as_bytes());
 
         let encrypted_keys_offset = dh_offset + DH_LEN;
@@ -417,10 +381,7 @@ impl HybridHandshake {
         self.remote_static_dh_public = Some(remote_static_dh);
         self.remote_static_kem_public = Some(remote_static_kem);
 
-        let ss_secret = x25519::dh(
-            self.static_dh.inner(),
-            &DalekPublicKey::from(remote_static_dh),
-        )?;
+        let ss_secret = x25519::dh(&self.static_dh, &remote_static_dh)?;
         self.symmetric()?.mix_key(ss_secret.as_bytes());
 
         self.phase = Phase::ResponderWriteMessage2;
@@ -429,12 +390,7 @@ impl HybridHandshake {
     }
 
     /// Write the hybrid Message 2 tokens and responder payload.
-    fn write_message_2(
-        &mut self,
-        payload: &[u8],
-        output: &mut [u8],
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<usize, Error> {
+    fn write_message_2(&mut self, payload: &[u8], output: &mut [u8]) -> Result<usize, Error> {
         let total_length = MSG2_OVERHEAD
             .checked_add(payload.len())
             .ok_or(Error::BadMessage)?;
@@ -448,24 +404,15 @@ impl HybridHandshake {
         }
 
         let remote_ephemeral_kem = self.remote_ephemeral_kem_public.ok_or(Error::WrongState)?;
-        let (ephemeral_kem_ciphertext, ephemeral_kem_secret) = pq::kem_encapsulate(
-            &remote_ephemeral_kem,
-            &self.seec_key,
-            HYBRID_PROTOCOL_NAME,
-            rng,
-        )?;
+        let (ephemeral_kem_ciphertext, ephemeral_kem_secret) =
+            pq::kem_encapsulate(&remote_ephemeral_kem)?;
 
         output[..KEM_CT_LEN].copy_from_slice(&ephemeral_kem_ciphertext);
         self.symmetric()?.mix_hash(&ephemeral_kem_ciphertext);
         self.symmetric()?.mix_key(ephemeral_kem_secret.as_bytes());
 
         let remote_static_kem = self.remote_static_kem_public.ok_or(Error::WrongState)?;
-        let (static_kem_ciphertext, static_kem_secret) = pq::kem_encapsulate(
-            &remote_static_kem,
-            &self.seec_key,
-            HYBRID_PROTOCOL_NAME,
-            rng,
-        )?;
+        let (static_kem_ciphertext, static_kem_secret) = pq::kem_encapsulate(&remote_static_kem)?;
 
         let encrypted_static_end = KEM_CT_LEN + KEM_CT_LEN + AEAD_TAG_LEN;
         let encrypted_static_length = self.symmetric()?.encrypt_and_hash(
@@ -479,27 +426,24 @@ impl HybridHandshake {
 
         self.symmetric()?.mix_key(static_kem_secret.as_bytes());
 
-        let ephemeral_dh_bytes =
-            pq::seec_ephemeral_dh_secret(&self.seec_key, HYBRID_PROTOCOL_NAME, rng);
-        let ephemeral_dh = DalekStaticSecret::from(*ephemeral_dh_bytes);
-        let ephemeral_dh_public = DalekPublicKey::from(&ephemeral_dh).to_bytes();
+        let (ephemeral_dh, ephemeral_dh_public) = x25519::generate_keypair()?;
 
         output[encrypted_static_end..encrypted_static_end + DH_LEN]
             .copy_from_slice(&ephemeral_dh_public);
         self.symmetric()?.mix_hash(&ephemeral_dh_public);
-        self.ephemeral_dh = Some(StaticSecret::from_dalek(ephemeral_dh));
+        self.ephemeral_dh = Some(ephemeral_dh);
 
         let remote_ephemeral_dh = self.remote_ephemeral_dh_public.ok_or(Error::WrongState)?;
         let ee_secret = x25519::dh(
-            self.ephemeral_dh.as_ref().ok_or(Error::WrongState)?.inner(),
-            &DalekPublicKey::from(remote_ephemeral_dh),
+            self.ephemeral_dh.as_ref().ok_or(Error::WrongState)?,
+            &remote_ephemeral_dh,
         )?;
         self.symmetric()?.mix_key(ee_secret.as_bytes());
 
         let remote_static_dh = self.remote_static_dh_public.ok_or(Error::WrongState)?;
         let se_secret = x25519::dh(
-            self.ephemeral_dh.as_ref().ok_or(Error::WrongState)?.inner(),
-            &DalekPublicKey::from(remote_static_dh),
+            self.ephemeral_dh.as_ref().ok_or(Error::WrongState)?,
+            &remote_static_dh,
         )?;
         self.symmetric()?.mix_key(se_secret.as_bytes());
 
@@ -531,9 +475,8 @@ impl HybridHandshake {
 
         self.symmetric()?.mix_hash(&ephemeral_kem_ciphertext);
 
-        let ephemeral_kem_seed = self.ephemeral_kem_seed.as_ref().ok_or(Error::WrongState)?;
-        let ephemeral_kem_secret =
-            pq::kem_decapsulate(ephemeral_kem_seed, &ephemeral_kem_ciphertext)?;
+        let ephemeral_kem = self.ephemeral_kem.as_ref().ok_or(Error::WrongState)?;
+        let ephemeral_kem_secret = pq::kem_decapsulate(ephemeral_kem, &ephemeral_kem_ciphertext)?;
         self.symmetric()?.mix_key(ephemeral_kem_secret.as_bytes());
 
         let encrypted_static_end = KEM_CT_LEN + KEM_CT_LEN + AEAD_TAG_LEN;
@@ -547,7 +490,7 @@ impl HybridHandshake {
             return Err(Error::BadMessage);
         }
 
-        let static_kem_secret = pq::kem_decapsulate(&self.static_kem_seed, &static_kem_ciphertext)?;
+        let static_kem_secret = pq::kem_decapsulate(&self.static_kem, &static_kem_ciphertext)?;
         self.symmetric()?.mix_key(static_kem_secret.as_bytes());
 
         let mut remote_ephemeral_dh = [0u8; DH_LEN];
@@ -558,15 +501,12 @@ impl HybridHandshake {
         self.remote_ephemeral_dh_public = Some(remote_ephemeral_dh);
 
         let ee_secret = x25519::dh(
-            self.ephemeral_dh.as_ref().ok_or(Error::WrongState)?.inner(),
-            &DalekPublicKey::from(remote_ephemeral_dh),
+            self.ephemeral_dh.as_ref().ok_or(Error::WrongState)?,
+            &remote_ephemeral_dh,
         )?;
         self.symmetric()?.mix_key(ee_secret.as_bytes());
 
-        let se_secret = x25519::dh(
-            self.static_dh.inner(),
-            &DalekPublicKey::from(remote_ephemeral_dh),
-        )?;
+        let se_secret = x25519::dh(&self.static_dh, &remote_ephemeral_dh)?;
         self.symmetric()?.mix_key(se_secret.as_bytes());
 
         let payload_offset = encrypted_static_end + DH_LEN;

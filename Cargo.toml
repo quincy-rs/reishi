@@ -21,13 +21,8 @@ categories = ["cryptography", "network-programming"]
 reishi-handshake = { path = "reishi-handshake", version = "0.4.0" }
 
 # Cryptography
-blake2 = { version = "0.10", default-features = false }
-chacha20 = "0.9"
-chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
-x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
-ml-kem = { version = "0.3", default-features = false, features = ["zeroize"] }
+aws-lc-rs = { version = "1.19", default-features = false, features = ["non-fips"] }
 subtle = { version = "2", default-features = false }
-rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 zeroize = { version = "1", default-features = false, features = ["zeroize_derive", "alloc"] }
 
 # Quinn

@@ -1,73 +1,46 @@
-use blake2::{Blake2s256, Digest};
+use aws_lc_rs::{digest, hmac};
 use zeroize::Zeroizing;
 
-/// Hash output length (BLAKE2s = 32 bytes).
-pub const HASH_LEN: usize = 32;
+/// Hash output length (SHA-512 = 64 bytes).
+pub const HASH_LEN: usize = 64;
 
-/// Compute BLAKE2s-256 hash of input.
+/// Compute SHA-512 hash of input.
 pub fn hash(input: &[u8]) -> [u8; HASH_LEN] {
-    let mut hasher = Blake2s256::new();
-    hasher.update(input);
-    let result = hasher.finalize();
     let mut out = [0u8; HASH_LEN];
-    out.copy_from_slice(&result);
+    out.copy_from_slice(digest::digest(&digest::SHA512, input).as_ref());
     out
 }
 
-/// Compute BLAKE2s-256 hash of two concatenated inputs without allocating.
+/// Compute SHA-512 hash of two concatenated inputs without allocating.
 pub fn hash_two(a: &[u8], b: &[u8]) -> [u8; HASH_LEN] {
-    let mut hasher = Blake2s256::new();
-    hasher.update(a);
-    hasher.update(b);
-    let result = hasher.finalize();
+    let mut ctx = digest::Context::new(&digest::SHA512);
+    ctx.update(a);
+    ctx.update(b);
+
     let mut out = [0u8; HASH_LEN];
-    out.copy_from_slice(&result);
+    out.copy_from_slice(ctx.finish().as_ref());
     out
 }
 
-/// Compute HMAC-BLAKE2s per [RFC 2104](https://datatracker.ietf.org/doc/html/rfc2104).
+/// Compute HMAC-SHA512 per [RFC 2104](https://datatracker.ietf.org/doc/html/rfc2104).
 ///
-/// Uses the standard HMAC construction, not BLAKE2's built-in keyed mode,
-/// for compatibility with other Noise implementations (notably `snow`).
-pub fn hmac(key: &[u8; HASH_LEN], data: &[u8]) -> Zeroizing<[u8; HASH_LEN]> {
+/// Accepts keys of any length; Noise keys are [`HASH_LEN`] bytes, QUIC token keys are shorter.
+pub fn hmac(key: &[u8], data: &[u8]) -> Zeroizing<[u8; HASH_LEN]> {
     hmac_multi(key, &[data])
 }
 
-/// HMAC-BLAKE2s over multiple data slices (fed sequentially to the hasher).
+/// HMAC-SHA512 over multiple data slices (fed sequentially to the MAC).
 ///
 /// Avoids concatenating inputs into a temporary buffer.
-pub(crate) fn hmac_multi(key: &[u8; HASH_LEN], parts: &[&[u8]]) -> Zeroizing<[u8; HASH_LEN]> {
-    const BLOCK_SIZE: usize = 64; // BLAKE2s block size
-    const IPAD: u8 = 0x36;
-    const OPAD: u8 = 0x5c;
-
-    // Key fits within block size (32 <= 64), no pre-hashing needed.
-    let mut ipad_key = Zeroizing::new([0u8; BLOCK_SIZE]);
-    let mut opad_key = Zeroizing::new([0u8; BLOCK_SIZE]);
-
-    for i in 0..HASH_LEN {
-        ipad_key[i] = key[i] ^ IPAD;
-        opad_key[i] = key[i] ^ OPAD;
-    }
-    for i in HASH_LEN..BLOCK_SIZE {
-        ipad_key[i] = IPAD;
-        opad_key[i] = OPAD;
-    }
-
-    let mut inner_hasher = Blake2s256::new();
-    inner_hasher.update(ipad_key.as_slice());
+pub(crate) fn hmac_multi(key: &[u8], parts: &[&[u8]]) -> Zeroizing<[u8; HASH_LEN]> {
+    let key = hmac::Key::new(hmac::HMAC_SHA512, key);
+    let mut ctx = hmac::Context::with_key(&key);
     for part in parts {
-        inner_hasher.update(part);
+        ctx.update(part);
     }
-    let inner_hash = inner_hasher.finalize();
-
-    let mut outer_hasher = Blake2s256::new();
-    outer_hasher.update(opad_key.as_slice());
-    outer_hasher.update(inner_hash);
-    let outer_hash = outer_hasher.finalize();
 
     let mut result = Zeroizing::new([0u8; HASH_LEN]);
-    result.copy_from_slice(&outer_hash);
+    result.copy_from_slice(ctx.sign().as_ref());
     result
 }
 
@@ -81,12 +54,12 @@ pub fn hkdf2(
     input_key_material: &[u8],
 ) -> (Zeroizing<[u8; HASH_LEN]>, Zeroizing<[u8; HASH_LEN]>) {
     let temp_key = hmac(chaining_key, input_key_material);
-    let output1 = hmac(&temp_key, &[0x01]);
+    let output1 = hmac(&temp_key[..], &[0x01]);
 
     let mut input2 = Zeroizing::new([0u8; HASH_LEN + 1]);
     input2[..HASH_LEN].copy_from_slice(&*output1);
     input2[HASH_LEN] = 0x02;
-    let output2 = hmac(&temp_key, input2.as_slice());
+    let output2 = hmac(&temp_key[..], input2.as_slice());
 
     (output1, output2)
 }
@@ -102,17 +75,17 @@ pub type HkdfOutput3 = (
 pub fn hkdf3(chaining_key: &[u8; HASH_LEN], input_key_material: &[u8]) -> HkdfOutput3 {
     let temp_key = hmac(chaining_key, input_key_material);
 
-    let output1 = hmac(&temp_key, &[0x01]);
+    let output1 = hmac(&temp_key[..], &[0x01]);
 
     let mut input2 = Zeroizing::new([0u8; HASH_LEN + 1]);
     input2[..HASH_LEN].copy_from_slice(&*output1);
     input2[HASH_LEN] = 0x02;
-    let output2 = hmac(&temp_key, input2.as_slice());
+    let output2 = hmac(&temp_key[..], input2.as_slice());
 
     let mut input3 = Zeroizing::new([0u8; HASH_LEN + 1]);
     input3[..HASH_LEN].copy_from_slice(&*output2);
     input3[HASH_LEN] = 0x03;
-    let output3 = hmac(&temp_key, input3.as_slice());
+    let output3 = hmac(&temp_key[..], input3.as_slice());
 
     (output1, output2, output3)
 }
@@ -120,7 +93,7 @@ pub fn hkdf3(chaining_key: &[u8; HASH_LEN], input_key_material: &[u8]) -> HkdfOu
 /// HKDF-Expand per [RFC 5869 Section 2.3](https://datatracker.ietf.org/doc/html/rfc5869#section-2.3).
 ///
 /// Derives `output.len()` bytes from the pseudorandom key `prk` and `info`.
-/// Maximum output length is 255 × [`HASH_LEN`] (8160 bytes).
+/// Maximum output length is 255 × [`HASH_LEN`] (16320 bytes).
 ///
 /// Returns `true` on success, `false` if the requested length exceeds the maximum.
 pub fn hkdf_expand(prk: &[u8; HASH_LEN], info: &[u8], output: &mut [u8]) -> bool {

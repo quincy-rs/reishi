@@ -1,20 +1,17 @@
 //! Static key types for the KEM-only `pqIK` and hybrid IK handshakes.
 //!
-//! KEM-only secrets serialize as `ml_kem_seed || seec_key`. Hybrid secrets
-//! prepend the X25519 secret. The independent SEEC key hardens per-session
-//! randomness and must be persisted with the static ML-KEM seed.
+//! KEM-only secrets serialize as the 2400-byte FIPS 203 expanded ML-KEM-768
+//! decapsulation key. Hybrid secrets prepend the X25519 secret. Restoring a
+//! secret validates the expanded key's internal consistency.
 
 use core::hash::{Hash, Hasher};
 
-use rand_core::CryptoRngCore;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::standard::{KeyPair, PublicKey, StaticSecret};
-use crate::crypto::pq::{KEM_EK_LEN, KEM_SEED_LEN, kem_ek_from_seed, kem_generate};
-
-/// Length of the persistent KDF-SEEC key stored beside each ML-KEM secret.
-pub(crate) const SEEC_KEY_LEN: usize = 32;
+use crate::crypto::pq::{KEM_DK_LEN, KEM_EK_LEN, kem_ek_from_dk, kem_generate, kem_validate_dk};
+use crate::error::Error;
 
 /// An ML-KEM-768 encapsulation key.
 #[derive(Clone)]
@@ -79,18 +76,15 @@ impl Drop for EncapsulationKey {
     }
 }
 
-/// KEM-only static secret: ML-KEM seed followed by an independent SEEC key.
+/// KEM-only static secret: the FIPS 203 expanded ML-KEM-768 decapsulation key.
 pub struct PqStaticSecret {
-    /// Seed used to reconstruct the ML-KEM decapsulation key.
-    pub(crate) kem_seed: Zeroizing<[u8; KEM_SEED_LEN]>,
-
-    /// Independent persistent key used to harden session randomness.
-    pub(crate) seec_key: Zeroizing<[u8; SEEC_KEY_LEN]>,
+    /// Expanded ML-KEM decapsulation key (`dk_PKE || ek || H(ek) || z`).
+    pub(crate) kem_dk: Zeroizing<[u8; KEM_DK_LEN]>,
 }
 
 impl PqStaticSecret {
-    /// Serialized length of `ml_kem_seed || seec_key`.
-    pub const LEN: usize = KEM_SEED_LEN + SEEC_KEY_LEN;
+    /// Serialized length of the expanded ML-KEM decapsulation key.
+    pub const LEN: usize = KEM_DK_LEN;
 }
 
 /// KEM-only ML-KEM-768 public key.
@@ -124,7 +118,7 @@ impl PqPublicKey {
 
 /// KEM-only static keypair for `pqIK`.
 pub struct PqKeyPair {
-    /// Secret ML-KEM seed and persistent SEEC key.
+    /// Secret expanded ML-KEM decapsulation key.
     pub secret: PqStaticSecret,
 
     /// Corresponding ML-KEM encapsulation key.
@@ -132,15 +126,12 @@ pub struct PqKeyPair {
 }
 
 impl PqKeyPair {
-    /// Generate a KEM-only static keypair and an independent persistent SEEC key.
-    pub fn generate(rng: &mut impl CryptoRngCore) -> Self {
-        let (kem_seed, kem_ek) = kem_generate(rng);
-
-        let mut seec_key = Zeroizing::new([0u8; SEEC_KEY_LEN]);
-        rng.fill_bytes(&mut *seec_key);
+    /// Generate a KEM-only static keypair from aws-lc's CSPRNG.
+    pub fn generate() -> Self {
+        let (kem_dk, kem_ek) = kem_generate();
 
         Self {
-            secret: PqStaticSecret { kem_seed, seec_key },
+            secret: PqStaticSecret { kem_dk },
 
             public: PqPublicKey {
                 kem_ek: EncapsulationKey::from_bytes(kem_ek),
@@ -150,7 +141,7 @@ impl PqKeyPair {
 
     /// Reconstruct the public key belonging to an existing static secret.
     pub fn from_secret(secret: PqStaticSecret) -> Self {
-        let kem_ek = kem_ek_from_seed(&secret.kem_seed);
+        let kem_ek = kem_ek_from_dk(&secret.kem_dk);
 
         Self {
             secret,
@@ -161,43 +152,38 @@ impl PqKeyPair {
         }
     }
 
-    /// Restore a keypair from `ml_kem_seed || seec_key`.
-    pub fn from_secret_bytes(bytes: &[u8; PqStaticSecret::LEN]) -> Self {
-        let mut kem_seed = Zeroizing::new([0u8; KEM_SEED_LEN]);
-        kem_seed.copy_from_slice(&bytes[..KEM_SEED_LEN]);
+    /// Restore a keypair from an expanded ML-KEM decapsulation key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BadKey`] if the key fails the FIPS 203 hash check or a
+    /// pairwise consistency test (corrupted or mismatched key material).
+    pub fn from_secret_bytes(bytes: &[u8; PqStaticSecret::LEN]) -> Result<Self, Error> {
+        kem_validate_dk(bytes)?;
 
-        let mut seec_key = Zeroizing::new([0u8; SEEC_KEY_LEN]);
-        seec_key.copy_from_slice(&bytes[KEM_SEED_LEN..]);
-
-        Self::from_secret(PqStaticSecret { kem_seed, seec_key })
+        Ok(Self::from_secret(PqStaticSecret {
+            kem_dk: Zeroizing::new(*bytes),
+        }))
     }
 
-    /// Export `ml_kem_seed || seec_key` in zeroizing storage.
+    /// Export the expanded ML-KEM decapsulation key in zeroizing storage.
     pub fn secret_bytes(&self) -> Zeroizing<[u8; PqStaticSecret::LEN]> {
-        let mut secret_bytes = Zeroizing::new([0u8; PqStaticSecret::LEN]);
-
-        secret_bytes[..KEM_SEED_LEN].copy_from_slice(&*self.secret.kem_seed);
-        secret_bytes[KEM_SEED_LEN..].copy_from_slice(&*self.secret.seec_key);
-
-        secret_bytes
+        self.secret.kem_dk.clone()
     }
 }
 
-/// Hybrid X25519 + ML-KEM static secret with an independent SEEC key.
+/// Hybrid X25519 + ML-KEM static secret.
 pub struct HybridStaticSecret {
     /// X25519 static secret used by the classical IK tokens.
     pub(crate) dh: StaticSecret,
 
-    /// Seed used to reconstruct the ML-KEM decapsulation key.
-    pub(crate) kem_seed: Zeroizing<[u8; KEM_SEED_LEN]>,
-
-    /// Independent persistent key used to harden session randomness.
-    pub(crate) seec_key: Zeroizing<[u8; SEEC_KEY_LEN]>,
+    /// Expanded ML-KEM decapsulation key (`dk_PKE || ek || H(ek) || z`).
+    pub(crate) kem_dk: Zeroizing<[u8; KEM_DK_LEN]>,
 }
 
 impl HybridStaticSecret {
-    /// Serialized length of `x25519_secret || ml_kem_seed || seec_key`.
-    pub const LEN: usize = StaticSecret::LEN + KEM_SEED_LEN + SEEC_KEY_LEN;
+    /// Serialized length of `x25519_secret || ml_kem_expanded_dk`.
+    pub const LEN: usize = StaticSecret::LEN + KEM_DK_LEN;
 }
 
 /// Hybrid X25519 + ML-KEM public key.
@@ -251,7 +237,7 @@ impl HybridPublicKey {
 
 /// Hybrid X25519 + ML-KEM static keypair.
 pub struct HybridKeyPair {
-    /// X25519 secret, ML-KEM seed, and persistent SEEC key.
+    /// X25519 secret and expanded ML-KEM decapsulation key.
     pub secret: HybridStaticSecret,
 
     /// Corresponding X25519 and ML-KEM public keys.
@@ -259,19 +245,15 @@ pub struct HybridKeyPair {
 }
 
 impl HybridKeyPair {
-    /// Generate independent X25519, ML-KEM, and persistent SEEC key material.
-    pub fn generate(rng: &mut impl CryptoRngCore) -> Self {
-        let dh_keypair = KeyPair::generate(rng);
-        let (kem_seed, kem_ek) = kem_generate(rng);
-
-        let mut seec_key = Zeroizing::new([0u8; SEEC_KEY_LEN]);
-        rng.fill_bytes(&mut *seec_key);
+    /// Generate independent X25519 and ML-KEM key material from aws-lc's CSPRNG.
+    pub fn generate() -> Self {
+        let dh_keypair = KeyPair::generate();
+        let (kem_dk, kem_ek) = kem_generate();
 
         Self {
             secret: HybridStaticSecret {
                 dh: dh_keypair.secret,
-                kem_seed,
-                seec_key,
+                kem_dk,
             },
 
             public: HybridPublicKey {
@@ -284,13 +266,12 @@ impl HybridKeyPair {
     /// Reconstruct both public-key components from an existing hybrid secret.
     pub fn from_secret(secret: HybridStaticSecret) -> Self {
         let dh_keypair = KeyPair::from_secret(secret.dh);
-        let kem_ek = kem_ek_from_seed(&secret.kem_seed);
+        let kem_ek = kem_ek_from_dk(&secret.kem_dk);
 
         Self {
             secret: HybridStaticSecret {
                 dh: dh_keypair.secret,
-                kem_seed: secret.kem_seed,
-                seec_key: secret.seec_key,
+                kem_dk: secret.kem_dk,
             },
 
             public: HybridPublicKey {
@@ -300,36 +281,35 @@ impl HybridKeyPair {
         }
     }
 
-    /// Restore a keypair from `x25519_secret || ml_kem_seed || seec_key`.
-    pub fn from_secret_bytes(bytes: &[u8; HybridStaticSecret::LEN]) -> Self {
-        let kem_offset = StaticSecret::LEN;
-        let seec_offset = kem_offset + KEM_SEED_LEN;
+    /// Restore a keypair from `x25519_secret || ml_kem_expanded_dk`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BadKey`] if the ML-KEM part fails the FIPS 203 hash
+    /// check or a pairwise consistency test. Any 32 bytes are a valid X25519 secret.
+    pub fn from_secret_bytes(bytes: &[u8; HybridStaticSecret::LEN]) -> Result<Self, Error> {
+        let (dh_secret, kem_bytes) = bytes.split_at(StaticSecret::LEN);
 
-        let mut dh_secret = Zeroizing::new([0u8; StaticSecret::LEN]);
-        dh_secret.copy_from_slice(&bytes[..kem_offset]);
+        let mut kem_dk = Zeroizing::new([0u8; KEM_DK_LEN]);
+        kem_dk.copy_from_slice(kem_bytes);
+        kem_validate_dk(&kem_dk)?;
 
-        let mut kem_seed = Zeroizing::new([0u8; KEM_SEED_LEN]);
-        kem_seed.copy_from_slice(&bytes[kem_offset..seec_offset]);
-
-        let mut seec_key = Zeroizing::new([0u8; SEEC_KEY_LEN]);
-        seec_key.copy_from_slice(&bytes[seec_offset..]);
-
-        Self::from_secret(HybridStaticSecret {
-            dh: StaticSecret::from_bytes(&dh_secret),
-            kem_seed,
-            seec_key,
-        })
+        Ok(Self::from_secret(HybridStaticSecret {
+            dh: StaticSecret::from_bytes(
+                dh_secret
+                    .try_into()
+                    .expect("prefix is StaticSecret::LEN bytes"),
+            ),
+            kem_dk,
+        }))
     }
 
-    /// Export `x25519_secret || ml_kem_seed || seec_key` in zeroizing storage.
+    /// Export `x25519_secret || ml_kem_expanded_dk` in zeroizing storage.
     pub fn secret_bytes(&self) -> Zeroizing<[u8; HybridStaticSecret::LEN]> {
-        let kem_offset = StaticSecret::LEN;
-        let seec_offset = kem_offset + KEM_SEED_LEN;
         let mut secret_bytes = Zeroizing::new([0u8; HybridStaticSecret::LEN]);
 
-        secret_bytes[..kem_offset].copy_from_slice(&*self.secret.dh.to_bytes());
-        secret_bytes[kem_offset..seec_offset].copy_from_slice(&*self.secret.kem_seed);
-        secret_bytes[seec_offset..].copy_from_slice(&*self.secret.seec_key);
+        secret_bytes[..StaticSecret::LEN].copy_from_slice(&*self.secret.dh.to_bytes());
+        secret_bytes[StaticSecret::LEN..].copy_from_slice(&*self.secret.kem_dk);
 
         secret_bytes
     }
@@ -341,30 +321,44 @@ mod tests {
 
     #[test]
     fn pq_secret_and_public_round_trip() {
-        let keypair = PqKeyPair::generate(&mut rand_core::OsRng);
-        let restored = PqKeyPair::from_secret_bytes(&keypair.secret_bytes());
+        let keypair = PqKeyPair::generate();
+        let restored = PqKeyPair::from_secret_bytes(&keypair.secret_bytes()).unwrap();
 
         assert_eq!(keypair.public, restored.public);
-        assert_eq!(PqStaticSecret::LEN, 96);
+        assert_eq!(PqStaticSecret::LEN, 2400);
         assert_eq!(PqPublicKey::LEN, 1184);
     }
 
     #[test]
     fn hybrid_secret_and_public_round_trip() {
-        let keypair = HybridKeyPair::generate(&mut rand_core::OsRng);
-        let restored = HybridKeyPair::from_secret_bytes(&keypair.secret_bytes());
+        let keypair = HybridKeyPair::generate();
+        let restored = HybridKeyPair::from_secret_bytes(&keypair.secret_bytes()).unwrap();
 
         assert_eq!(keypair.public, restored.public);
-        assert_eq!(HybridStaticSecret::LEN, 128);
+        assert_eq!(HybridStaticSecret::LEN, 2432);
         assert_eq!(HybridPublicKey::LEN, 1216);
     }
 
     #[test]
+    fn tampered_secret_bytes_are_rejected() {
+        let mut pq = PqKeyPair::generate().secret_bytes();
+        pq[1152] ^= 1;
+        assert_eq!(PqKeyPair::from_secret_bytes(&pq).err(), Some(Error::BadKey));
+
+        let mut hybrid = HybridKeyPair::generate().secret_bytes();
+        hybrid[StaticSecret::LEN + 1152] ^= 1;
+        assert_eq!(
+            HybridKeyPair::from_secret_bytes(&hybrid).err(),
+            Some(Error::BadKey)
+        );
+    }
+
+    #[test]
     fn public_serialization_round_trips() {
-        let pq = PqKeyPair::generate(&mut rand_core::OsRng);
+        let pq = PqKeyPair::generate();
         assert_eq!(PqPublicKey::from_bytes(pq.public.to_bytes()), pq.public);
 
-        let hybrid = HybridKeyPair::generate(&mut rand_core::OsRng);
+        let hybrid = HybridKeyPair::generate();
         assert_eq!(
             HybridPublicKey::from_bytes(hybrid.public.to_bytes()),
             hybrid.public,

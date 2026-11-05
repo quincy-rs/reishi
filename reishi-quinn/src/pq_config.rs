@@ -10,7 +10,7 @@ use reishi_handshake::{Error, HybridKeyPair, HybridPublicKey, PqKeyPair, PqPubli
 use crate::initial::compute_retry_tag;
 use crate::keys::keys_from_level_secret;
 use crate::session::NoiseSession;
-use crate::{REISHI_PQ_HYBRID_V1_QUIC_V1, REISHI_PQ_KEM_V1_QUIC_V1};
+use crate::{REISHI_PQ_HYBRID_V2_QUIC_V1, REISHI_PQ_KEM_V2_QUIC_V1};
 
 pub(crate) struct PqNoiseConfig {
     pub(crate) local_keypair: PqKeyPair,
@@ -31,7 +31,7 @@ impl crypto::ClientConfig for PqNoiseClientConfig {
         _server_name: &str,
         params: &TransportParameters,
     ) -> Result<Box<dyn crypto::Session>, ConnectError> {
-        if version != REISHI_PQ_KEM_V1_QUIC_V1 {
+        if version != REISHI_PQ_KEM_V2_QUIC_V1 {
             return Err(ConnectError::UnsupportedVersion);
         }
 
@@ -57,7 +57,7 @@ impl crypto::ServerConfig for PqNoiseServerConfig {
         version: u32,
         destination_connection_id: &ConnectionId,
     ) -> Result<crypto::Keys, crypto::UnsupportedVersion> {
-        if version != REISHI_PQ_KEM_V1_QUIC_V1 {
+        if version != REISHI_PQ_KEM_V2_QUIC_V1 {
             return Err(crypto::UnsupportedVersion);
         }
 
@@ -72,7 +72,7 @@ impl crypto::ServerConfig for PqNoiseServerConfig {
         original_destination_connection_id: &ConnectionId,
         packet: &[u8],
     ) -> [u8; 16] {
-        if version != REISHI_PQ_KEM_V1_QUIC_V1 {
+        if version != REISHI_PQ_KEM_V2_QUIC_V1 {
             return [0u8; 16];
         }
 
@@ -84,7 +84,7 @@ impl crypto::ServerConfig for PqNoiseServerConfig {
         version: u32,
         params: &TransportParameters,
     ) -> Box<dyn crypto::Session> {
-        if version != REISHI_PQ_KEM_V1_QUIC_V1 {
+        if version != REISHI_PQ_KEM_V2_QUIC_V1 {
             return Box::new(NoiseSession::failed());
         }
 
@@ -192,7 +192,7 @@ impl crypto::ClientConfig for HybridNoiseClientConfig {
         _server_name: &str,
         params: &TransportParameters,
     ) -> Result<Box<dyn crypto::Session>, ConnectError> {
-        if version != REISHI_PQ_HYBRID_V1_QUIC_V1 {
+        if version != REISHI_PQ_HYBRID_V2_QUIC_V1 {
             return Err(ConnectError::UnsupportedVersion);
         }
 
@@ -218,7 +218,7 @@ impl crypto::ServerConfig for HybridNoiseServerConfig {
         version: u32,
         destination_connection_id: &ConnectionId,
     ) -> Result<crypto::Keys, crypto::UnsupportedVersion> {
-        if version != REISHI_PQ_HYBRID_V1_QUIC_V1 {
+        if version != REISHI_PQ_HYBRID_V2_QUIC_V1 {
             return Err(crypto::UnsupportedVersion);
         }
 
@@ -233,7 +233,7 @@ impl crypto::ServerConfig for HybridNoiseServerConfig {
         original_destination_connection_id: &ConnectionId,
         packet: &[u8],
     ) -> [u8; 16] {
-        if version != REISHI_PQ_HYBRID_V1_QUIC_V1 {
+        if version != REISHI_PQ_HYBRID_V2_QUIC_V1 {
             return [0u8; 16];
         }
 
@@ -245,7 +245,7 @@ impl crypto::ServerConfig for HybridNoiseServerConfig {
         version: u32,
         params: &TransportParameters,
     ) -> Box<dyn crypto::Session> {
-        if version != REISHI_PQ_HYBRID_V1_QUIC_V1 {
+        if version != REISHI_PQ_HYBRID_V2_QUIC_V1 {
             return Box::new(NoiseSession::failed());
         }
 

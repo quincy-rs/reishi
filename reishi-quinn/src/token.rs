@@ -5,8 +5,8 @@
 //! `quinn_proto::crypto::HandshakeTokenKey`, and
 //! `quinn_proto::crypto::AeadKey`.
 
+use aws_lc_rs::rand;
 use quinn_proto::crypto;
-use rand_core::{OsRng, RngCore};
 use reishi_handshake::crypto::aead::{self, AEAD_KEY_LEN, AEAD_TAG_LEN};
 use reishi_handshake::crypto::hash::{self, HASH_LEN};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -29,7 +29,7 @@ impl NoiseHmacKey {
     /// Create a new HMAC key with random key material.
     pub fn new() -> Self {
         let mut key = [0u8; HASH_LEN];
-        OsRng.fill_bytes(&mut key);
+        rand::fill(&mut key).expect("aws-lc CSPRNG failed");
         Self { key }
     }
 }
@@ -73,7 +73,7 @@ impl NoiseHandshakeTokenKey {
     /// Create a new handshake token key with random key material.
     pub fn new() -> Self {
         let mut key = [0u8; HASH_LEN];
-        OsRng.fill_bytes(&mut key);
+        rand::fill(&mut key).expect("aws-lc CSPRNG failed");
         Self { key }
     }
 }
@@ -81,33 +81,20 @@ impl NoiseHandshakeTokenKey {
 impl crypto::HandshakeTokenKey for NoiseHandshakeTokenKey {
     fn aead_from_hkdf(&self, random_bytes: &[u8]) -> Box<dyn crypto::AeadKey> {
         let derived = hash::hmac(&self.key, random_bytes);
-        let mut aead_key = [0u8; AEAD_KEY_LEN];
+        let mut aead_key = Zeroizing::new([0u8; AEAD_KEY_LEN]);
         aead_key.copy_from_slice(&(*derived)[..AEAD_KEY_LEN]);
-        Box::new(NoiseAeadKey::new(aead_key))
+        Box::new(NoiseAeadKey::new(&aead_key))
     }
 }
 
-/// AEAD key for token encryption.
-///
-/// Implements `quinn_proto::crypto::AeadKey`.
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub struct NoiseAeadKey {
-    key: [u8; AEAD_KEY_LEN],
-}
-
-/// Length of the random salt prepended to each sealed token.
-const TOKEN_SALT_LEN: usize = 16;
+/// Length of the random nonce prepended to each sealed token.
+const TOKEN_NONCE_LEN: usize = 8;
 
 impl NoiseAeadKey {
-    fn new(key: [u8; AEAD_KEY_LEN]) -> Self {
-        Self { key }
-    }
-
-    fn derive_token_key(&self, salt: &[u8]) -> Zeroizing<[u8; AEAD_KEY_LEN]> {
-        let derived = hash::hmac(&self.key, salt);
-        let mut token_key = Zeroizing::new([0u8; AEAD_KEY_LEN]);
-        token_key.copy_from_slice(&(*derived)[..AEAD_KEY_LEN]);
-        token_key
+    fn new(key: &[u8; AEAD_KEY_LEN]) -> Self {
+        Self {
+            key: aead::AeadKey::new(key),
+        }
     }
 }
 
@@ -115,32 +102,30 @@ impl NoiseAeadKey {
 ///
 /// Used by quinn for encrypting address validation tokens.
 ///
-/// Construction: the token stores a fresh random salt, then encrypts with
-/// ChaCha20Poly1305 using an HMAC-derived per-token key and the fixed Noise
-/// nonce `0`. Security: even though the nonce is fixed, the AEAD key changes
-/// for every token because the salt changes, so the same key/nonce pair is
-/// never reused.
+/// Quinn derives one instance per token from the token's random value, so
+/// every sealed token uses a distinct AEAD key. A fresh random 64-bit nonce is
+/// prepended to each sealed token, and the aws-lc AEAD context is built once
+/// per key and reused; aws-lc cleanses it when dropped.
+pub struct NoiseAeadKey {
+    key: aead::AeadKey,
+}
+
 impl crypto::AeadKey for NoiseAeadKey {
     fn seal(&self, data: &mut Vec<u8>, additional_data: &[u8]) -> Result<(), crypto::CryptoError> {
-        let mut salt = [0u8; TOKEN_SALT_LEN];
-        OsRng.fill_bytes(&mut salt);
-        let token_key = self.derive_token_key(&salt);
+        let mut nonce_bytes = [0u8; TOKEN_NONCE_LEN];
+        rand::fill(&mut nonce_bytes).map_err(|_| crypto::CryptoError)?;
+        let nonce = u64::from_le_bytes(nonce_bytes);
 
         let plaintext_len = data.len();
         data.extend_from_slice(&[0u8; AEAD_TAG_LEN]);
-        aead::encrypt_in_place(
-            &token_key,
-            0,
-            additional_data,
-            data.as_mut_slice(),
-            plaintext_len,
-        )
-        .map_err(|_| crypto::CryptoError)?;
+        self.key
+            .encrypt_in_place(nonce, additional_data, data.as_mut_slice(), plaintext_len)
+            .map_err(|_| crypto::CryptoError)?;
 
         let ct_len = data.len();
-        data.resize(ct_len + TOKEN_SALT_LEN, 0);
-        data.copy_within(0..ct_len, TOKEN_SALT_LEN);
-        data[..TOKEN_SALT_LEN].copy_from_slice(&salt);
+        data.resize(ct_len + TOKEN_NONCE_LEN, 0);
+        data.copy_within(0..ct_len, TOKEN_NONCE_LEN);
+        data[..TOKEN_NONCE_LEN].copy_from_slice(&nonce_bytes);
         Ok(())
     }
 
@@ -149,17 +134,22 @@ impl crypto::AeadKey for NoiseAeadKey {
         data: &'a mut [u8],
         additional_data: &[u8],
     ) -> Result<&'a mut [u8], crypto::CryptoError> {
-        if data.len() < TOKEN_SALT_LEN + AEAD_TAG_LEN {
+        if data.len() < TOKEN_NONCE_LEN + AEAD_TAG_LEN {
             return Err(crypto::CryptoError);
         }
 
-        let token_key = self.derive_token_key(&data[..TOKEN_SALT_LEN]);
-        let ciphertext = &mut data[TOKEN_SALT_LEN..];
+        let nonce = u64::from_le_bytes(
+            data[..TOKEN_NONCE_LEN]
+                .try_into()
+                .expect("prefix is TOKEN_NONCE_LEN bytes"),
+        );
+        let ciphertext = &mut data[TOKEN_NONCE_LEN..];
         let ciphertext_len = ciphertext.len();
-        let plaintext_len =
-            aead::decrypt_in_place(&token_key, 0, additional_data, ciphertext, ciphertext_len)
-                .map_err(|_| crypto::CryptoError)?;
-        Ok(&mut data[TOKEN_SALT_LEN..TOKEN_SALT_LEN + plaintext_len])
+        let plaintext_len = self
+            .key
+            .decrypt_in_place(nonce, additional_data, ciphertext, ciphertext_len)
+            .map_err(|_| crypto::CryptoError)?;
+        Ok(&mut data[TOKEN_NONCE_LEN..TOKEN_NONCE_LEN + plaintext_len])
     }
 }
 
@@ -222,15 +212,16 @@ mod tests {
     }
 
     #[test]
-    fn aead_seal_uses_salt_prefix() {
-        let aead = NoiseAeadKey {
-            key: [0x42u8; AEAD_KEY_LEN],
-        };
+    fn aead_seal_uses_nonce_prefix() {
+        let aead = NoiseAeadKey::new(&[0x42u8; AEAD_KEY_LEN]);
 
         let mut data = b"payload".to_vec();
         aead.seal(&mut data, b"ad").unwrap();
 
-        assert_eq!(data.len(), TOKEN_SALT_LEN + b"payload".len() + AEAD_TAG_LEN);
+        assert_eq!(
+            data.len(),
+            TOKEN_NONCE_LEN + b"payload".len() + AEAD_TAG_LEN
+        );
 
         let plaintext = aead.open(&mut data, b"ad").unwrap();
         assert_eq!(plaintext, b"payload");

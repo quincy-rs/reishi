@@ -1,6 +1,4 @@
-use rand_core::CryptoRngCore;
-use subtle::ConstantTimeEq;
-use x25519_dalek::{PublicKey as DalekPublicKey, StaticSecret as DalekStaticSecret};
+use aws_lc_rs::agreement::{self, PrivateKey, UnparsedPublicKey, X25519};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::Error;
@@ -27,52 +25,67 @@ impl SharedSecret {
     }
 }
 
-/// Generate a new random X25519 secret key (usable as ephemeral or static).
+/// Generate a new random X25519 private key (usable as ephemeral or static).
 ///
-/// Returns (secret, public_key_bytes).
-pub fn generate_keypair(rng: &mut impl CryptoRngCore) -> (DalekStaticSecret, [u8; DH_LEN]) {
-    let secret = DalekStaticSecret::random_from_rng(rng);
-    let public = DalekPublicKey::from(&secret);
-    (secret, public.to_bytes())
+/// Returns (private_key, public_key_bytes).
+pub fn generate_keypair() -> Result<(PrivateKey, [u8; DH_LEN]), Error> {
+    let private = PrivateKey::generate(&X25519).map_err(|_| Error::CryptoFailed)?;
+    let public = public_key(&private)?;
+    Ok((private, public))
 }
 
-/// Perform DH with a static/ephemeral secret and a remote public key.
+/// Import raw 32-byte X25519 secret key material into aws-lc.
+pub fn private_key(secret: &[u8; DH_LEN]) -> Result<PrivateKey, Error> {
+    PrivateKey::from_private_key(&X25519, secret).map_err(|_| Error::BadKey)
+}
+
+/// Derive the 32-byte public key of an X25519 private key.
+pub fn public_key(private: &PrivateKey) -> Result<[u8; DH_LEN], Error> {
+    private
+        .compute_public_key()
+        .map_err(|_| Error::CryptoFailed)?
+        .as_ref()
+        .try_into()
+        .map_err(|_| Error::CryptoFailed)
+}
+
+/// Perform DH with a static/ephemeral private key and a remote public key.
 ///
 /// Returns the 32-byte shared secret, or `Error::BadKey` if the
-/// result is the all-zeros point (low-order input).
+/// result is the all-zeros point (low-order input); aws-lc rejects it.
 ///
 /// This check is required by RFC 7748 Section 6.1 and recommended
 /// by the Noise spec Section 12.1.
-pub fn dh(local: &DalekStaticSecret, remote: &DalekPublicKey) -> Result<SharedSecret, Error> {
-    let shared = local.diffie_hellman(remote);
-    validate_shared_secret(shared.as_bytes())
-}
-
-/// Reject the all-zeros shared secret, which indicates a low-order public key.
-fn validate_shared_secret(bytes: &[u8; 32]) -> Result<SharedSecret, Error> {
-    let is_zero = bytes.ct_eq(&[0u8; 32]);
-    if bool::from(is_zero) {
-        Err(Error::BadKey)
-    } else {
-        Ok(SharedSecret(*bytes))
-    }
+pub fn dh(local: &PrivateKey, remote: &[u8; DH_LEN]) -> Result<SharedSecret, Error> {
+    agreement::agree(
+        local,
+        UnparsedPublicKey::new(&X25519, remote),
+        Error::BadKey,
+        |shared| {
+            let mut out = [0u8; DH_LEN];
+            out.copy_from_slice(shared);
+            Ok(SharedSecret(out))
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn hex32(s: &str) -> [u8; 32] {
+        hex::decode(s).unwrap().try_into().unwrap()
+    }
+
     #[test]
     fn reject_zero_public_key() {
-        let secret = DalekStaticSecret::from([1u8; 32]);
-        let zero_pk = DalekPublicKey::from([0u8; 32]);
-        let result = dh(&secret, &zero_pk);
-        assert_eq!(result.unwrap_err(), Error::BadKey);
+        let secret = private_key(&[1u8; 32]).unwrap();
+        assert_eq!(dh(&secret, &[0u8; 32]).unwrap_err(), Error::BadKey);
     }
 
     #[test]
     fn reject_low_order_points() {
-        // Known low-order points on Curve25519
+        // Known low-order points on Curve25519; each yields an all-zero output.
         let low_order_points: [[u8; 32]; 4] = [
             // Identity (all zeros)
             [0; 32],
@@ -96,25 +109,26 @@ mod tests {
             ],
         ];
 
-        let secret = DalekStaticSecret::from([0x42u8; 32]);
+        let secret = private_key(&[0x42u8; 32]).unwrap();
         for point in &low_order_points {
-            let pk = DalekPublicKey::from(*point);
-            let result = dh(&secret, &pk);
-            // Some low-order points produce non-zero results due to X25519's
-            // cofactor clamping -- those are safe (not predictable without the key).
-            if let Ok(shared) = &result {
-                assert!(!bool::from(shared.as_bytes().ct_eq(&[0u8; 32])));
-            }
+            assert_eq!(dh(&secret, point).unwrap_err(), Error::BadKey);
         }
     }
 
     #[test]
-    fn normal_dh_succeeds() {
-        let (secret1, pub1) = generate_keypair(&mut rand_core::OsRng);
-        let (secret2, pub2) = generate_keypair(&mut rand_core::OsRng);
+    fn rfc7748_shared_secret() {
+        // RFC 7748 Section 6.1.
+        let alice_secret =
+            hex32("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+        let alice_public =
+            hex32("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+        let bob_secret = hex32("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
+        let bob_public = hex32("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+        let expected = hex32("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
 
-        let shared1 = dh(&secret1, &DalekPublicKey::from(pub2)).unwrap();
-        let shared2 = dh(&secret2, &DalekPublicKey::from(pub1)).unwrap();
-        assert_eq!(shared1.as_bytes(), shared2.as_bytes());
+        let alice = dh(&private_key(&alice_secret).unwrap(), &bob_public).unwrap();
+        let bob = dh(&private_key(&bob_secret).unwrap(), &alice_public).unwrap();
+        assert_eq!(*alice.as_bytes(), expected);
+        assert_eq!(*bob.as_bytes(), expected);
     }
 }

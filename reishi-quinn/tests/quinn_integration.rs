@@ -8,16 +8,15 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 
 use quinn::{ClientConfig, Endpoint, EndpointConfig, ServerConfig};
-use rand_core::OsRng;
 use reishi_quinn::{
-    KeyPair, NoiseConfigBuilder, PeerIdentity, PeerPublicKey, REISHI_V1_QUIC_V1,
+    KeyPair, NoiseConfigBuilder, PeerIdentity, PeerPublicKey, REISHI_V2_QUIC_V1,
     noise_handshake_token_key, noise_hmac_key,
 };
 
 /// Build an EndpointConfig that supports our custom QUIC version.
 fn endpoint_config() -> EndpointConfig {
     let mut config = EndpointConfig::new(noise_hmac_key());
-    config.supported_versions(vec![REISHI_V1_QUIC_V1]);
+    config.supported_versions(vec![REISHI_V2_QUIC_V1]);
     config
 }
 
@@ -60,7 +59,7 @@ fn make_client_config(kp: KeyPair, server_public: reishi_quinn::PublicKey) -> Cl
         .build_client_config()
         .unwrap();
     let mut config = ClientConfig::new(Arc::new(noise));
-    config.version(REISHI_V1_QUIC_V1);
+    config.version(REISHI_V2_QUIC_V1);
     config
 }
 
@@ -70,9 +69,9 @@ fn make_client_config(kp: KeyPair, server_public: reishi_quinn::PublicKey) -> Cl
 
 #[tokio::test]
 async fn handshake_and_bidirectional_data() {
-    let server_kp = KeyPair::generate(&mut OsRng);
+    let server_kp = KeyPair::generate();
     let server_public = server_kp.public;
-    let client_kp = KeyPair::generate(&mut OsRng);
+    let client_kp = KeyPair::generate();
 
     let server = server_endpoint(make_server_config(server_kp));
     let server_addr = server.local_addr().unwrap();
@@ -113,9 +112,9 @@ async fn handshake_and_bidirectional_data() {
 
 #[tokio::test]
 async fn peer_identity_available() {
-    let server_kp = KeyPair::generate(&mut OsRng);
+    let server_kp = KeyPair::generate();
     let server_public = server_kp.public;
-    let client_kp = KeyPair::generate(&mut OsRng);
+    let client_kp = KeyPair::generate();
     let client_public = client_kp.public;
 
     let server = server_endpoint(make_server_config(server_kp));
@@ -166,7 +165,7 @@ async fn peer_identity_available() {
 
 #[tokio::test]
 async fn multiple_connections() {
-    let server_kp = KeyPair::generate(&mut OsRng);
+    let server_kp = KeyPair::generate();
     let server_public = server_kp.public;
 
     let server = server_endpoint(make_server_config(server_kp));
@@ -174,7 +173,7 @@ async fn multiple_connections() {
     let client = client_endpoint();
 
     for i in 0u8..3 {
-        let client_kp = KeyPair::generate(&mut OsRng);
+        let client_kp = KeyPair::generate();
         let client_config = make_client_config(client_kp, server_public);
         let connecting = client
             .connect_with(client_config, server_addr, "server")
@@ -203,9 +202,9 @@ async fn multiple_connections() {
 
 #[tokio::test]
 async fn unidirectional_streams() {
-    let server_kp = KeyPair::generate(&mut OsRng);
+    let server_kp = KeyPair::generate();
     let server_public = server_kp.public;
-    let client_kp = KeyPair::generate(&mut OsRng);
+    let client_kp = KeyPair::generate();
 
     let server = server_endpoint(make_server_config(server_kp));
     let server_addr = server.local_addr().unwrap();
@@ -240,9 +239,9 @@ async fn unidirectional_streams() {
 
 #[tokio::test]
 async fn wrong_server_key_rejected() {
-    let server_kp = KeyPair::generate(&mut OsRng);
-    let wrong_kp = KeyPair::generate(&mut OsRng);
-    let client_kp = KeyPair::generate(&mut OsRng);
+    let server_kp = KeyPair::generate();
+    let wrong_kp = KeyPair::generate();
+    let client_kp = KeyPair::generate();
 
     let server = server_endpoint(make_server_config(server_kp));
     let server_addr = server.local_addr().unwrap();
@@ -279,9 +278,9 @@ async fn wrong_server_key_rejected() {
 
 #[tokio::test]
 async fn export_keying_material() {
-    let server_kp = KeyPair::generate(&mut OsRng);
+    let server_kp = KeyPair::generate();
     let server_public = server_kp.public;
-    let client_kp = KeyPair::generate(&mut OsRng);
+    let client_kp = KeyPair::generate();
 
     let server = server_endpoint(make_server_config(server_kp));
     let server_addr = server.local_addr().unwrap();
@@ -330,9 +329,9 @@ async fn export_keying_material() {
 
 #[tokio::test]
 async fn whitelisted_client_accepted() {
-    let server_kp = KeyPair::generate(&mut OsRng);
+    let server_kp = KeyPair::generate();
     let server_public = server_kp.public;
-    let client_kp = KeyPair::generate(&mut OsRng);
+    let client_kp = KeyPair::generate();
     let client_public = client_kp.public;
 
     let server = server_endpoint(make_server_config_with_allowed_keys(
@@ -370,10 +369,10 @@ async fn whitelisted_client_accepted() {
 
 #[tokio::test]
 async fn non_whitelisted_client_rejected() {
-    let server_kp = KeyPair::generate(&mut OsRng);
+    let server_kp = KeyPair::generate();
     let server_public = server_kp.public;
-    let client_kp = KeyPair::generate(&mut OsRng);
-    let other_kp = KeyPair::generate(&mut OsRng);
+    let client_kp = KeyPair::generate();
+    let other_kp = KeyPair::generate();
 
     // Whitelist only other_kp, not the actual client
     let server = server_endpoint(make_server_config_with_allowed_keys(
@@ -411,9 +410,9 @@ async fn non_whitelisted_client_rejected() {
 
 #[tokio::test]
 async fn empty_whitelist_rejects_all() {
-    let server_kp = KeyPair::generate(&mut OsRng);
+    let server_kp = KeyPair::generate();
     let server_public = server_kp.public;
-    let client_kp = KeyPair::generate(&mut OsRng);
+    let client_kp = KeyPair::generate();
 
     // Empty whitelist: no clients allowed
     let server = server_endpoint(make_server_config_with_allowed_keys(

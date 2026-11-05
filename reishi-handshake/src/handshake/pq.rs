@@ -8,12 +8,12 @@
 //! -> ENC(confirm, payload_i)
 //! ```
 
-use rand_core::{CryptoRngCore, OsRng};
+use aws_lc_rs::kem::{self, AlgorithmId};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::aead::AEAD_TAG_LEN;
 use crate::crypto::hash::{self, HASH_LEN};
-use crate::crypto::pq::{self, KEM_CT_LEN, KEM_EK_LEN, KEM_SEED_LEN};
+use crate::crypto::pq::{self, KEM_CT_LEN, KEM_EK_LEN};
 use crate::error::Error;
 use crate::handshake::standard::HandshakeAction;
 use crate::keys::pq::{EncapsulationKey, PqKeyPair, PqPublicKey};
@@ -21,7 +21,7 @@ use crate::symmetric_state::SymmetricState;
 use crate::transport::TransportState;
 
 /// Transcript name for the fixed confirmed KEM-only ciphersuite.
-pub const PQ_PROTOCOL_NAME: &str = "Noise_pqIKkc_MLKEM768_ChaChaPoly_BLAKE2s";
+pub const PQ_PROTOCOL_NAME: &str = "Noise_pqIKkc_MLKEM768_ChaChaPoly_SHA512";
 /// Largest handshake message accepted or emitted by the state machine.
 pub const MAX_MESSAGE_LEN: usize = 65535;
 
@@ -53,12 +53,11 @@ pub struct PqHandshake {
     is_initiator: bool,
     remote_authenticated: bool,
 
-    static_kem_seed: Zeroizing<[u8; KEM_SEED_LEN]>,
+    static_kem: kem::DecapsulationKey<AlgorithmId>,
     static_kem_public: [u8; KEM_EK_LEN],
-    seec_key: Zeroizing<[u8; 32]>,
     remote_static_kem_public: Option<[u8; KEM_EK_LEN]>,
     remote_ephemeral_kem_public: Option<[u8; KEM_EK_LEN]>,
-    ephemeral_kem_seed: Option<Zeroizing<[u8; KEM_SEED_LEN]>>,
+    ephemeral_kem: Option<kem::DecapsulationKey<AlgorithmId>>,
 }
 
 impl Drop for PqHandshake {
@@ -91,12 +90,11 @@ impl PqHandshake {
             phase: Phase::InitiatorWriteMessage1,
             is_initiator: true,
             remote_authenticated: false,
-            static_kem_seed: local.secret.kem_seed.clone(),
+            static_kem: pq::kem_decapsulation_key(&local.secret.kem_dk)?,
             static_kem_public: *local.public.kem_ek.as_bytes(),
-            seec_key: local.secret.seec_key.clone(),
             remote_static_kem_public: Some(*remote_public.kem_ek.as_bytes()),
             remote_ephemeral_kem_public: None,
-            ephemeral_kem_seed: None,
+            ephemeral_kem: None,
         })
     }
 
@@ -111,12 +109,11 @@ impl PqHandshake {
             phase: Phase::ResponderReadMessage1,
             is_initiator: false,
             remote_authenticated: false,
-            static_kem_seed: local.secret.kem_seed.clone(),
+            static_kem: pq::kem_decapsulation_key(&local.secret.kem_dk)?,
             static_kem_public: *local.public.kem_ek.as_bytes(),
-            seec_key: local.secret.seec_key.clone(),
             remote_static_kem_public: None,
             remote_ephemeral_kem_public: None,
-            ephemeral_kem_seed: None,
+            ephemeral_kem: None,
         })
     }
 
@@ -148,23 +145,11 @@ impl PqHandshake {
         )
     }
 
-    /// Write the next handshake flight using the operating system RNG.
+    /// Write the next handshake flight; randomness comes from aws-lc's CSPRNG.
     pub fn write_message(&mut self, payload: &[u8], output: &mut [u8]) -> Result<usize, Error> {
-        self.write_message_with_rng(payload, output, &mut OsRng)
-    }
-
-    /// Write the next handshake flight using caller-supplied session coins.
-    ///
-    /// The coins are hardened with the keypair's persistent SEEC key before use.
-    pub fn write_message_with_rng(
-        &mut self,
-        payload: &[u8],
-        output: &mut [u8],
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<usize, Error> {
         match self.phase {
-            Phase::InitiatorWriteMessage1 => self.write_message_1(payload, output, rng),
-            Phase::ResponderWriteMessage2 => self.write_message_2(payload, output, rng),
+            Phase::InitiatorWriteMessage1 => self.write_message_1(payload, output),
+            Phase::ResponderWriteMessage2 => self.write_message_2(payload, output),
             Phase::InitiatorWriteMessage3 => self.write_message_3(payload, output),
             _ => Err(Error::WrongState),
         }
@@ -255,12 +240,7 @@ impl PqHandshake {
     }
 
     /// Write `skem_r, ENC(e_kem_i, s_kem_i)` without application payload.
-    fn write_message_1(
-        &mut self,
-        payload: &[u8],
-        output: &mut [u8],
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<usize, Error> {
+    fn write_message_1(&mut self, payload: &[u8], output: &mut [u8]) -> Result<usize, Error> {
         if !payload.is_empty() {
             return Err(Error::WrongState);
         }
@@ -270,16 +250,14 @@ impl PqHandshake {
         }
 
         let remote_static = self.remote_static_kem_public.ok_or(Error::WrongState)?;
-        let (static_ciphertext, static_secret) =
-            pq::kem_encapsulate(&remote_static, &self.seec_key, PQ_PROTOCOL_NAME, rng)?;
+        let (static_ciphertext, static_secret) = pq::kem_encapsulate(&remote_static)?;
 
         output[..KEM_CT_LEN].copy_from_slice(&static_ciphertext);
         self.symmetric()?.mix_hash(&static_ciphertext);
         self.symmetric()?.mix_key(static_secret.as_bytes());
 
-        let (ephemeral_seed, ephemeral_public) =
-            pq::kem_generate_ephemeral(&self.seec_key, PQ_PROTOCOL_NAME, rng);
-        self.ephemeral_kem_seed = Some(ephemeral_seed);
+        let (ephemeral_kem, ephemeral_public) = pq::kem_generate_ephemeral()?;
+        self.ephemeral_kem = Some(ephemeral_kem);
 
         let mut public_keys = Zeroizing::new([0u8; 2 * KEM_EK_LEN]);
         public_keys[..KEM_EK_LEN].copy_from_slice(&ephemeral_public);
@@ -309,7 +287,7 @@ impl PqHandshake {
 
         self.symmetric()?.mix_hash(&static_ciphertext);
 
-        let static_secret = pq::kem_decapsulate(&self.static_kem_seed, &static_ciphertext)?;
+        let static_secret = pq::kem_decapsulate(&self.static_kem, &static_ciphertext)?;
         self.symmetric()?.mix_key(static_secret.as_bytes());
 
         let mut public_keys = Zeroizing::new([0u8; 2 * KEM_EK_LEN]);
@@ -335,12 +313,7 @@ impl PqHandshake {
     }
 
     /// Write `ekem_i, ENC(skem_i), payload_r` and await confirmation.
-    fn write_message_2(
-        &mut self,
-        payload: &[u8],
-        output: &mut [u8],
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<usize, Error> {
+    fn write_message_2(&mut self, payload: &[u8], output: &mut [u8]) -> Result<usize, Error> {
         let total_length = MSG2_OVERHEAD
             .checked_add(payload.len())
             .ok_or(Error::BadMessage)?;
@@ -354,16 +327,14 @@ impl PqHandshake {
         }
 
         let remote_ephemeral = self.remote_ephemeral_kem_public.ok_or(Error::WrongState)?;
-        let (ephemeral_ciphertext, ephemeral_secret) =
-            pq::kem_encapsulate(&remote_ephemeral, &self.seec_key, PQ_PROTOCOL_NAME, rng)?;
+        let (ephemeral_ciphertext, ephemeral_secret) = pq::kem_encapsulate(&remote_ephemeral)?;
 
         output[..KEM_CT_LEN].copy_from_slice(&ephemeral_ciphertext);
         self.symmetric()?.mix_hash(&ephemeral_ciphertext);
         self.symmetric()?.mix_key(ephemeral_secret.as_bytes());
 
         let remote_static = self.remote_static_kem_public.ok_or(Error::WrongState)?;
-        let (static_ciphertext, static_secret) =
-            pq::kem_encapsulate(&remote_static, &self.seec_key, PQ_PROTOCOL_NAME, rng)?;
+        let (static_ciphertext, static_secret) = pq::kem_encapsulate(&remote_static)?;
 
         let encrypted_static_length = self.symmetric()?.encrypt_and_hash(
             &static_ciphertext,
@@ -404,8 +375,8 @@ impl PqHandshake {
 
         self.symmetric()?.mix_hash(&ephemeral_ciphertext);
 
-        let ephemeral_seed = self.ephemeral_kem_seed.as_ref().ok_or(Error::WrongState)?;
-        let ephemeral_secret = pq::kem_decapsulate(ephemeral_seed, &ephemeral_ciphertext)?;
+        let ephemeral_kem = self.ephemeral_kem.as_ref().ok_or(Error::WrongState)?;
+        let ephemeral_secret = pq::kem_decapsulate(ephemeral_kem, &ephemeral_ciphertext)?;
         self.symmetric()?.mix_key(ephemeral_secret.as_bytes());
 
         let encrypted_static_end = KEM_CT_LEN + KEM_CT_LEN + AEAD_TAG_LEN;
@@ -419,7 +390,7 @@ impl PqHandshake {
             return Err(Error::BadMessage);
         }
 
-        let static_secret = pq::kem_decapsulate(&self.static_kem_seed, &static_ciphertext)?;
+        let static_secret = pq::kem_decapsulate(&self.static_kem, &static_ciphertext)?;
         self.symmetric()?.mix_key(static_secret.as_bytes());
 
         let decrypted_payload_length = self

@@ -1,5 +1,4 @@
-use rand_core::{CryptoRngCore, OsRng};
-use x25519_dalek::PublicKey as DalekPublicKey;
+use aws_lc_rs::agreement::PrivateKey;
 use zeroize::Zeroize;
 
 use crate::crypto::aead::AEAD_TAG_LEN;
@@ -9,7 +8,7 @@ use crate::error::Error;
 use crate::symmetric_state::SymmetricState;
 
 /// The Noise protocol name for the fixed ciphersuite.
-pub const PROTOCOL_NAME: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
+pub const PROTOCOL_NAME: &str = "Noise_IK_25519_ChaChaPoly_SHA512";
 
 /// Maximum handshake message size accepted or emitted, in bytes.
 ///
@@ -19,7 +18,7 @@ pub const PROTOCOL_NAME: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 /// typically < 200 bytes plus application payload.
 pub const MAX_MESSAGE_LEN: usize = 65535;
 
-use crate::keys::{KeyPair, PublicKey, StaticSecret};
+use crate::keys::{KeyPair, PublicKey};
 use crate::transport::TransportState;
 
 /// The current action the caller must take to advance the handshake.
@@ -45,7 +44,7 @@ enum Phase {
 
 /// A Noise IK handshake state machine.
 ///
-/// Implements the fixed ciphersuite `Noise_IK_25519_ChaChaPoly_BLAKE2s`.
+/// Implements the fixed ciphersuite `Noise_IK_25519_ChaChaPoly_SHA512`.
 ///
 /// ## IK Pattern
 ///
@@ -62,10 +61,10 @@ pub struct Handshake {
     symmetric: Option<SymmetricState>,
     phase: Phase,
     is_initiator: bool,
-    s: StaticSecret,
+    s: PrivateKey,
     s_pub: [u8; DH_LEN],
     rs: Option<[u8; DH_LEN]>,
-    e: Option<StaticSecret>,
+    e: Option<PrivateKey>,
     e_pub: Option<[u8; DH_LEN]>,
     re: Option<[u8; DH_LEN]>,
 }
@@ -108,11 +107,9 @@ impl Handshake {
             symmetric: Some(symmetric),
             phase: Phase::InitiatorWriteMsg1,
             is_initiator: true,
-            // Clone is necessary: the caller (e.g. quinn session) retains
-            // the keypair in an Arc for reuse across sessions. Both copies
-            // implement ZeroizeOnDrop and the extra copy is short-lived
-            // (dropped when the handshake completes).
-            s: local.secret.clone(),
+            // The static secret is imported into aws-lc for this handshake;
+            // aws-lc wipes the imported key when the handshake is dropped.
+            s: local.secret.private_key()?,
             s_pub: *local.public.as_bytes(),
             rs: Some(*remote_public.as_bytes()),
             e: None,
@@ -137,8 +134,8 @@ impl Handshake {
             symmetric: Some(symmetric),
             phase: Phase::ResponderReadMsg1,
             is_initiator: false,
-            // See comment in new_initiator for clone rationale.
-            s: local.secret.clone(),
+            // See comment in new_initiator.
+            s: local.secret.private_key()?,
             s_pub: *local.public.as_bytes(),
             rs: None,
             e: None,
@@ -165,19 +162,9 @@ impl Handshake {
     /// `payload` is optional application data to encrypt within the message.
     /// Returns the number of bytes written to `out`.
     pub fn write_message(&mut self, payload: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-        self.write_message_with_rng(payload, out, &mut OsRng)
-    }
-
-    /// Write the next handshake message with a specific RNG (useful for testing).
-    pub fn write_message_with_rng(
-        &mut self,
-        payload: &[u8],
-        out: &mut [u8],
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<usize, Error> {
         match self.phase {
-            Phase::InitiatorWriteMsg1 => self.write_msg1(payload, out, rng),
-            Phase::ResponderWriteMsg2 => self.write_msg2(payload, out, rng),
+            Phase::InitiatorWriteMsg1 => self.write_msg1(payload, out),
+            Phase::ResponderWriteMsg2 => self.write_msg2(payload, out),
             _ => Err(Error::WrongState),
         }
     }
@@ -291,12 +278,7 @@ impl Handshake {
     //
     // Layout: [e_pub(32)][encrypted_s_pub(32+16)][encrypted_payload(N+16)]
 
-    fn write_msg1(
-        &mut self,
-        payload: &[u8],
-        out: &mut [u8],
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<usize, Error> {
+    fn write_msg1(&mut self, payload: &[u8], out: &mut [u8]) -> Result<usize, Error> {
         let overhead = self.next_message_overhead();
         let total = overhead
             .checked_add(payload.len())
@@ -313,19 +295,16 @@ impl Handshake {
         let mut offset = 0;
 
         // -> e
-        let (e_secret, e_pub) = x25519::generate_keypair(rng);
+        let (e_private, e_pub) = x25519::generate_keypair()?;
         out[offset..offset + DH_LEN].copy_from_slice(&e_pub);
         self.ss()?.mix_hash(&e_pub);
-        self.e = Some(StaticSecret::from_dalek(e_secret));
+        self.e = Some(e_private);
         self.e_pub = Some(e_pub);
         offset += DH_LEN;
 
         // -> es: DH(e, rs)
         let rs = self.rs.ok_or(Error::WrongState)?;
-        let shared_es = x25519::dh(
-            self.e.as_ref().ok_or(Error::WrongState)?.inner(),
-            &DalekPublicKey::from(rs),
-        )?;
+        let shared_es = x25519::dh(self.e.as_ref().ok_or(Error::WrongState)?, &rs)?;
         self.ss()?.mix_key(shared_es.as_bytes());
 
         // -> s
@@ -334,7 +313,7 @@ impl Handshake {
         offset += s_len;
 
         // -> ss: DH(s, rs)
-        let shared_ss = x25519::dh(self.s.inner(), &DalekPublicKey::from(rs))?;
+        let shared_ss = x25519::dh(&self.s, &rs)?;
         self.ss()?.mix_key(shared_ss.as_bytes());
 
         let p_len = self.ss()?.encrypt_and_hash(payload, &mut out[offset..])?;
@@ -369,7 +348,7 @@ impl Handshake {
         offset += DH_LEN;
 
         // -> es: DH(s, re)
-        let shared_es = x25519::dh(self.s.inner(), &DalekPublicKey::from(re))?;
+        let shared_es = x25519::dh(&self.s, &re)?;
         self.ss()?.mix_key(shared_es.as_bytes());
 
         // -> s
@@ -385,7 +364,7 @@ impl Handshake {
         offset += encrypted_s_len;
 
         // -> ss: DH(s, rs)
-        let shared_ss = x25519::dh(self.s.inner(), &DalekPublicKey::from(rs_bytes))?;
+        let shared_ss = x25519::dh(&self.s, &rs_bytes)?;
         self.ss()?.mix_key(shared_ss.as_bytes());
         let remaining = &message[offset..];
         if remaining.len() < AEAD_TAG_LEN {
@@ -401,12 +380,7 @@ impl Handshake {
     //
     // Layout: [e_pub(32)][encrypted_payload(N+16)]
 
-    fn write_msg2(
-        &mut self,
-        payload: &[u8],
-        out: &mut [u8],
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<usize, Error> {
+    fn write_msg2(&mut self, payload: &[u8], out: &mut [u8]) -> Result<usize, Error> {
         let overhead = self.next_message_overhead();
         let total = overhead
             .checked_add(payload.len())
@@ -423,27 +397,21 @@ impl Handshake {
         let mut offset = 0;
 
         // <- e
-        let (e_secret, e_pub) = x25519::generate_keypair(rng);
+        let (e_private, e_pub) = x25519::generate_keypair()?;
         out[offset..offset + DH_LEN].copy_from_slice(&e_pub);
         self.ss()?.mix_hash(&e_pub);
-        self.e = Some(StaticSecret::from_dalek(e_secret));
+        self.e = Some(e_private);
         self.e_pub = Some(e_pub);
         offset += DH_LEN;
 
         // <- ee: DH(e, re)
         let re = self.re.ok_or(Error::WrongState)?;
-        let shared_ee = x25519::dh(
-            self.e.as_ref().ok_or(Error::WrongState)?.inner(),
-            &DalekPublicKey::from(re),
-        )?;
+        let shared_ee = x25519::dh(self.e.as_ref().ok_or(Error::WrongState)?, &re)?;
         self.ss()?.mix_key(shared_ee.as_bytes());
 
         // <- se: DH(e, rs)
         let rs = self.rs.ok_or(Error::WrongState)?;
-        let shared_se = x25519::dh(
-            self.e.as_ref().ok_or(Error::WrongState)?.inner(),
-            &DalekPublicKey::from(rs),
-        )?;
+        let shared_se = x25519::dh(self.e.as_ref().ok_or(Error::WrongState)?, &rs)?;
         self.ss()?.mix_key(shared_se.as_bytes());
 
         let p_len = self.ss()?.encrypt_and_hash(payload, &mut out[offset..])?;
@@ -478,14 +446,11 @@ impl Handshake {
         offset += DH_LEN;
 
         // <- ee: DH(e, re)
-        let shared_ee = x25519::dh(
-            self.e.as_ref().ok_or(Error::WrongState)?.inner(),
-            &DalekPublicKey::from(re),
-        )?;
+        let shared_ee = x25519::dh(self.e.as_ref().ok_or(Error::WrongState)?, &re)?;
         self.ss()?.mix_key(shared_ee.as_bytes());
 
         // <- se: DH(s, re)
-        let shared_se = x25519::dh(self.s.inner(), &DalekPublicKey::from(re))?;
+        let shared_se = x25519::dh(&self.s, &re)?;
         self.ss()?.mix_key(shared_se.as_bytes());
         let remaining = &message[offset..];
         if remaining.len() < AEAD_TAG_LEN {
