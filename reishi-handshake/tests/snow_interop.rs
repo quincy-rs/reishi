@@ -1,14 +1,13 @@
 //! Interoperability and integration tests for reishi-handshake.
 //!
-//! Tests the `Noise_IK_25519_ChaChaPoly_BLAKE2s` implementation against
+//! Tests the `Noise_IK_25519_ChaChaPoly_SHA512` implementation against
 //! the `snow` crate, and verifies internal consistency of the reishi API.
 
-use rand::RngCore;
 use reishi_handshake::{
     Error, Handshake, HandshakeAction, KeyPair, PublicKey, StaticSecret, TransportState,
 };
 
-const PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
+const PATTERN: &str = "Noise_IK_25519_ChaChaPoly_SHA512";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -17,7 +16,7 @@ const PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 /// Generate random 32-byte private key material.
 fn random_private_key() -> [u8; 32] {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    aws_lc_rs::rand::fill(&mut bytes).unwrap();
     bytes
 }
 
@@ -26,15 +25,11 @@ fn reishi_keypair_from_bytes(private: &[u8; 32]) -> KeyPair {
     KeyPair::from_secret(StaticSecret::from_bytes(private))
 }
 
-/// Derive the public key from a private key using x25519-dalek directly.
+/// Derive the public key for raw private key bytes via reishi.
 ///
-/// Both reishi and snow use x25519-dalek under the hood, so the derived
-/// public keys are identical.
-fn snow_public_key_for(private: &[u8; 32]) -> [u8; 32] {
-    use x25519_dalek::{PublicKey as DalekPub, StaticSecret as DalekSecret};
-    let secret = DalekSecret::from(*private);
-    let public = DalekPub::from(&secret);
-    public.to_bytes()
+/// snow derives its key from the same private bytes, so a mismatch fails the handshake.
+fn public_key_for(private: &[u8; 32]) -> [u8; 32] {
+    *KeyPair::from_secret_bytes(private).public.as_bytes()
 }
 
 /// Build a snow initiator from raw key material.
@@ -113,7 +108,7 @@ fn reishi_initiator_snow_responder() {
     let r_priv = random_private_key();
 
     // Derive public keys consistently
-    let r_pub = snow_public_key_for(&r_priv);
+    let r_pub = public_key_for(&r_priv);
 
     // Build reishi initiator with responder's public key
     let i_kp = reishi_keypair_from_bytes(&i_priv);
@@ -238,7 +233,7 @@ fn reishi_initiator_snow_responder_with_payload() {
     let i_priv = random_private_key();
     let r_priv = random_private_key();
 
-    let r_pub = snow_public_key_for(&r_priv);
+    let r_pub = public_key_for(&r_priv);
 
     let i_kp = reishi_keypair_from_bytes(&i_priv);
     let r_pub_reishi = PublicKey::from_bytes(r_pub);
@@ -315,7 +310,7 @@ fn snow_initiator_reishi_responder_with_payload() {
 fn interop_transport_messages() {
     let i_priv = random_private_key();
     let r_priv = random_private_key();
-    let r_pub = snow_public_key_for(&r_priv);
+    let r_pub = public_key_for(&r_priv);
 
     // Reishi initiator, snow responder
     let i_kp = reishi_keypair_from_bytes(&i_priv);
@@ -388,9 +383,8 @@ fn interop_transport_messages() {
 
 #[test]
 fn reishi_round_trip_empty() {
-    let mut rng = rand::thread_rng();
-    let i_kp = KeyPair::generate(&mut rng);
-    let r_kp = KeyPair::generate(&mut rng);
+    let i_kp = KeyPair::generate();
+    let r_kp = KeyPair::generate();
 
     let (i_transport, r_transport) = reishi_handshake_pair(&i_kp, &r_kp, &[], &[], &[]);
 
@@ -405,9 +399,8 @@ fn reishi_round_trip_empty() {
 
 #[test]
 fn reishi_round_trip_with_payload() {
-    let mut rng = rand::thread_rng();
-    let i_kp = KeyPair::generate(&mut rng);
-    let r_kp = KeyPair::generate(&mut rng);
+    let i_kp = KeyPair::generate();
+    let r_kp = KeyPair::generate();
 
     let msg1_payload = b"hello from initiator during handshake";
     let msg2_payload = b"hello from responder during handshake";
@@ -422,9 +415,8 @@ fn reishi_round_trip_with_payload() {
 
 #[test]
 fn reishi_transport_bidirectional() {
-    let mut rng = rand::thread_rng();
-    let i_kp = KeyPair::generate(&mut rng);
-    let r_kp = KeyPair::generate(&mut rng);
+    let i_kp = KeyPair::generate();
+    let r_kp = KeyPair::generate();
 
     let (mut i_transport, mut r_transport) = reishi_handshake_pair(&i_kp, &r_kp, &[], &[], &[]);
 
@@ -482,9 +474,8 @@ fn reishi_transport_bidirectional() {
 
 #[test]
 fn reishi_transport_rekey() {
-    let mut rng = rand::thread_rng();
-    let i_kp = KeyPair::generate(&mut rng);
-    let r_kp = KeyPair::generate(&mut rng);
+    let i_kp = KeyPair::generate();
+    let r_kp = KeyPair::generate();
 
     let (mut i_transport, mut r_transport) = reishi_handshake_pair(&i_kp, &r_kp, &[], &[], &[]);
 
@@ -561,9 +552,8 @@ fn reishi_transport_rekey() {
 
 #[test]
 fn handshake_hash_matches() {
-    let mut rng = rand::thread_rng();
-    let i_kp = KeyPair::generate(&mut rng);
-    let r_kp = KeyPair::generate(&mut rng);
+    let i_kp = KeyPair::generate();
+    let r_kp = KeyPair::generate();
 
     let mut initiator = Handshake::new_initiator(&i_kp, &r_kp.public, &[]).unwrap();
     let mut responder = Handshake::new_responder(&r_kp, &[]).unwrap();
@@ -612,9 +602,8 @@ fn handshake_hash_matches() {
 
 #[test]
 fn prologue_mismatch_fails() {
-    let mut rng = rand::thread_rng();
-    let i_kp = KeyPair::generate(&mut rng);
-    let r_kp = KeyPair::generate(&mut rng);
+    let i_kp = KeyPair::generate();
+    let r_kp = KeyPair::generate();
 
     let mut initiator = Handshake::new_initiator(&i_kp, &r_kp.public, b"prologue-A").unwrap();
     let mut responder = Handshake::new_responder(&r_kp, b"prologue-B").unwrap();
@@ -642,10 +631,9 @@ fn prologue_mismatch_fails() {
 
 #[test]
 fn wrong_server_key_fails() {
-    let mut rng = rand::thread_rng();
-    let i_kp = KeyPair::generate(&mut rng);
-    let r_kp = KeyPair::generate(&mut rng);
-    let wrong_kp = KeyPair::generate(&mut rng);
+    let i_kp = KeyPair::generate();
+    let r_kp = KeyPair::generate();
+    let wrong_kp = KeyPair::generate();
 
     // Initiator thinks responder has wrong_kp's public key
     let mut initiator = Handshake::new_initiator(&i_kp, &wrong_kp.public, &[]).unwrap();
@@ -672,9 +660,8 @@ fn wrong_server_key_fails() {
 
 #[test]
 fn truncated_message_fails() {
-    let mut rng = rand::thread_rng();
-    let i_kp = KeyPair::generate(&mut rng);
-    let r_kp = KeyPair::generate(&mut rng);
+    let i_kp = KeyPair::generate();
+    let r_kp = KeyPair::generate();
 
     // Test truncated msg1
     {
@@ -756,9 +743,8 @@ fn truncated_message_fails() {
 
 #[test]
 fn wrong_state_errors() {
-    let mut rng = rand::thread_rng();
-    let i_kp = KeyPair::generate(&mut rng);
-    let r_kp = KeyPair::generate(&mut rng);
+    let i_kp = KeyPair::generate();
+    let r_kp = KeyPair::generate();
 
     let mut buf = vec![0u8; 65535];
     let mut payload_buf = vec![0u8; 65535];
@@ -844,9 +830,8 @@ fn wrong_state_errors() {
 
 #[test]
 fn ask_before_complete_fails() {
-    let mut rng = rand::thread_rng();
-    let i_kp = KeyPair::generate(&mut rng);
-    let r_kp = KeyPair::generate(&mut rng);
+    let i_kp = KeyPair::generate();
+    let r_kp = KeyPair::generate();
 
     let mut buf = vec![0u8; 65535];
     let mut payload_buf = vec![0u8; 65535];
@@ -910,9 +895,8 @@ fn classical_and_transport_writers_enforce_message_limit() {
     const MESSAGE_2_OVERHEAD: usize = 48;
     const TRANSPORT_OVERHEAD: usize = 16;
 
-    let mut rng = rand::thread_rng();
-    let initiator_keypair = KeyPair::generate(&mut rng);
-    let responder_keypair = KeyPair::generate(&mut rng);
+    let initiator_keypair = KeyPair::generate();
+    let responder_keypair = KeyPair::generate();
     let mut output = vec![0u8; MAX_MESSAGE_LEN + 1];
     let mut payload_output = vec![0u8; MAX_MESSAGE_LEN];
 
@@ -1003,9 +987,8 @@ fn classical_and_transport_writers_enforce_message_limit() {
 
 #[test]
 fn classical_payload_buffer_errors_are_retryable() {
-    let mut rng = rand::thread_rng();
-    let initiator_keypair = KeyPair::generate(&mut rng);
-    let responder_keypair = KeyPair::generate(&mut rng);
+    let initiator_keypair = KeyPair::generate();
+    let responder_keypair = KeyPair::generate();
     let mut initiator =
         Handshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
     let mut responder = Handshake::new_responder(&responder_keypair, &[]).unwrap();
@@ -1049,4 +1032,57 @@ fn classical_payload_buffer_errors_are_retryable() {
         initiator.handshake_hash().unwrap(),
         responder.handshake_hash().unwrap(),
     );
+}
+
+// ===========================================================================
+// 16. reishi_snow_transport_rekey -- rekeying matches snow's REKEY
+// ===========================================================================
+
+#[test]
+fn reishi_snow_transport_rekey() {
+    let i_priv = random_private_key();
+    let r_priv = random_private_key();
+    let r_pub = public_key_for(&r_priv);
+
+    let i_kp = reishi_keypair_from_bytes(&i_priv);
+    let mut initiator =
+        Handshake::new_initiator(&i_kp, &PublicKey::from_bytes(r_pub), &[]).unwrap();
+    let mut responder = build_snow_responder(&r_priv);
+
+    let mut buf = vec![0u8; 65535];
+    let mut payload_buf = vec![0u8; 65535];
+
+    let len = initiator.write_message(&[], &mut buf).unwrap();
+    responder
+        .read_message(&buf[..len], &mut payload_buf)
+        .unwrap();
+    let len = responder.write_message(&[], &mut buf).unwrap();
+    initiator
+        .read_message(&buf[..len], &mut payload_buf)
+        .unwrap();
+
+    let mut i_transport = initiator.into_transport().unwrap();
+    let mut r_transport = responder.into_transport_mode().unwrap();
+
+    // Rekey initiator -> responder on both sides; snow computes REKEY independently.
+    i_transport.rekey_send().unwrap();
+    r_transport.rekey_incoming();
+
+    let msg = b"after rekey initiator->responder";
+    let len = i_transport.write_message(msg, &mut buf).unwrap();
+    let plen = r_transport
+        .read_message(&buf[..len], &mut payload_buf)
+        .unwrap();
+    assert_eq!(&payload_buf[..plen], msg);
+
+    // Rekey responder -> initiator on both sides.
+    r_transport.rekey_outgoing();
+    i_transport.rekey_recv().unwrap();
+
+    let msg = b"after rekey responder->initiator";
+    let len = r_transport.write_message(msg, &mut buf).unwrap();
+    let plen = i_transport
+        .read_message(&buf[..len], &mut payload_buf)
+        .unwrap();
+    assert_eq!(&payload_buf[..plen], msg);
 }

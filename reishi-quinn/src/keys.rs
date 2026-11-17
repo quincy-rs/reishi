@@ -2,12 +2,12 @@
 //!
 //! Provides `NoisePacketKey` and `NoiseHeaderKey` which implement the
 //! `quinn_proto::crypto::PacketKey` and `quinn_proto::crypto::HeaderKey`
-//! traits respectively, using ChaChaPoly1305 and BLAKE2s.
+//! traits respectively, using ChaChaPoly1305 and SHA-512.
 
+use aws_lc_rs::aead::quic::{CHACHA20, HeaderProtectionKey};
 use quinn_proto::crypto;
-use reishi_handshake::crypto::aead::{self, AEAD_KEY_LEN, AEAD_TAG_LEN};
+use reishi_handshake::crypto::aead::{AEAD_KEY_LEN, AEAD_TAG_LEN, AeadKey};
 use reishi_handshake::crypto::hash::HASH_LEN;
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::initial::derive_key_pair;
 
@@ -18,19 +18,20 @@ use crate::initial::derive_key_pair;
 pub const HEADER_SAMPLE_LEN: usize = 16;
 
 /// AEAD packet key implementing `quinn_proto::crypto::PacketKey`.
-#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct NoisePacketKey {
-    key: [u8; AEAD_KEY_LEN],
+    key: AeadKey,
 }
 
 impl NoisePacketKey {
     /// Create a new packet key from raw key material.
-    pub fn new(key: [u8; AEAD_KEY_LEN]) -> Self {
-        Self { key }
+    pub fn new(key: &[u8; AEAD_KEY_LEN]) -> Self {
+        Self {
+            key: AeadKey::new(key),
+        }
     }
 
     /// Wrap in a Box for use in `crypto::KeyPair`.
-    pub fn boxed(key: [u8; AEAD_KEY_LEN]) -> Box<dyn crypto::PacketKey> {
+    pub fn boxed(key: &[u8; AEAD_KEY_LEN]) -> Box<dyn crypto::PacketKey> {
         Box::new(Self::new(key))
     }
 }
@@ -42,7 +43,8 @@ impl crypto::PacketKey for NoisePacketKey {
             .len()
             .checked_sub(AEAD_TAG_LEN)
             .expect("payload too short for AEAD tag");
-        aead::encrypt_in_place(&self.key, packet, header, payload, plaintext_len)
+        self.key
+            .encrypt_in_place(packet, header, payload, plaintext_len)
             .expect("packet encryption should not fail");
     }
 
@@ -54,9 +56,10 @@ impl crypto::PacketKey for NoisePacketKey {
     ) -> Result<(), crypto::CryptoError> {
         let buffer = payload.as_mut();
         let ciphertext_len = buffer.len();
-        let plaintext_len =
-            aead::decrypt_in_place(&self.key, packet, header, buffer, ciphertext_len)
-                .map_err(|_| crypto::CryptoError)?;
+        let plaintext_len = self
+            .key
+            .decrypt_in_place(packet, header, buffer, ciphertext_len)
+            .map_err(|_| crypto::CryptoError)?;
         payload.truncate(plaintext_len);
         Ok(())
     }
@@ -82,45 +85,30 @@ impl crypto::PacketKey for NoisePacketKey {
 /// Uses ChaCha20 to derive a 5-byte mask from a 16-byte sample, matching
 /// the QUIC header protection scheme for ChaCha20-based ciphersuites
 /// (RFC 9001 Section 5.4.4).
-#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct NoiseHeaderKey {
-    key: [u8; AEAD_KEY_LEN],
+    key: HeaderProtectionKey,
 }
 
 impl NoiseHeaderKey {
     /// Create a new header protection key from raw key material.
-    pub fn new(key: [u8; AEAD_KEY_LEN]) -> Self {
-        Self { key }
+    pub fn new(key: &[u8; AEAD_KEY_LEN]) -> Self {
+        Self {
+            key: HeaderProtectionKey::new(&CHACHA20, key)
+                .expect("aws-lc accepts every 32-byte ChaCha20 header-protection key"),
+        }
     }
 
     /// Wrap in a Box for use in `crypto::KeyPair`.
-    pub fn boxed(key: [u8; AEAD_KEY_LEN]) -> Box<dyn crypto::HeaderKey> {
+    pub fn boxed(key: &[u8; AEAD_KEY_LEN]) -> Box<dyn crypto::HeaderKey> {
         Box::new(Self::new(key))
     }
 
-    /// Compute the 5-byte header protection mask from a 16-byte sample.
-    ///
-    /// For ChaCha20-based protection, the sample is used as a nonce+counter
-    /// input to ChaCha20 to generate the mask.
+    /// Compute the 5-byte header protection mask from a 16-byte sample
+    /// (RFC 9001 Section 5.4.4).
     fn header_protection_mask(&self, sample: &[u8]) -> [u8; 5] {
-        use chacha20::cipher::{KeyIvInit, StreamCipher};
-
-        // RFC 9001 Section 5.4.4: ChaCha20 header protection
-        // counter = sample[0..4] as little-endian u32
-        // nonce = sample[4..16]
-        // mask = ChaCha20(key, counter, nonce, 5 zero bytes)
-        let counter = u32::from_le_bytes(sample[0..4].try_into().unwrap());
-        let nonce: [u8; 12] = sample[4..16].try_into().unwrap();
-
-        let mut mask = [0u8; 5];
-        let mut cipher =
-            chacha20::ChaCha20::new_from_slices(&self.key, &nonce).expect("valid key/nonce");
-        // seek() takes a byte offset; each ChaCha20 block is 64 bytes,
-        // so multiply the block counter by 64 to get the byte position.
-        use chacha20::cipher::StreamCipherSeek;
-        cipher.seek(counter as u64 * 64);
-        cipher.apply_keystream(&mut mask);
-        mask
+        self.key
+            .new_mask(sample)
+            .expect("header protection sample is HEADER_SAMPLE_LEN bytes")
     }
 
     /// Apply header protection (encryption or decryption).
@@ -188,12 +176,12 @@ pub fn keys_from_level_secret(
 
     crypto::Keys {
         header: crypto::KeyPair {
-            local: NoiseHeaderKey::boxed(local_keys.header_key),
-            remote: NoiseHeaderKey::boxed(remote_keys.header_key),
+            local: NoiseHeaderKey::boxed(&local_keys.header_key),
+            remote: NoiseHeaderKey::boxed(&remote_keys.header_key),
         },
         packet: crypto::KeyPair {
-            local: NoisePacketKey::boxed(local_keys.packet_key),
-            remote: NoisePacketKey::boxed(remote_keys.packet_key),
+            local: NoisePacketKey::boxed(&local_keys.packet_key),
+            remote: NoisePacketKey::boxed(&remote_keys.packet_key),
         },
     }
 }
@@ -212,7 +200,33 @@ pub fn packet_keys_from_level_secret(
     };
 
     crypto::KeyPair {
-        local: NoisePacketKey::boxed(local_keys.packet_key),
-        remote: NoisePacketKey::boxed(remote_keys.packet_key),
+        local: NoisePacketKey::boxed(&local_keys.packet_key),
+        remote: NoisePacketKey::boxed(&remote_keys.packet_key),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quinn_proto::crypto::HeaderKey;
+
+    #[test]
+    fn chacha20_header_protection_matches_rfc9001_a5() {
+        let key = NoiseHeaderKey::new(&[
+            0x25, 0xa2, 0x82, 0xb9, 0xe8, 0x2f, 0x06, 0xf2, 0x1f, 0x48, 0x89, 0x17, 0xa4, 0xfc,
+            0x8f, 0x1b, 0x73, 0x57, 0x36, 0x85, 0x60, 0x85, 0x97, 0xd0, 0xef, 0xcb, 0x07, 0x6b,
+            0x0a, 0xb7, 0xa7, 0xa4,
+        ]);
+        let mut packet = [
+            0x42, 0x00, 0xbf, 0xf4, 0x65, 0x5e, 0x5c, 0xd5, 0x5c, 0x41, 0xf6, 0x90, 0x80, 0x57,
+            0x5d, 0x79, 0x99, 0xc2, 0x5a, 0x5b, 0xfb,
+        ];
+
+        // Short header with an empty DCID: the packet number starts at byte 1.
+        key.encrypt(1, &mut packet);
+        assert_eq!(packet[..4], [0x4c, 0xfe, 0x41, 0x89]);
+
+        key.decrypt(1, &mut packet);
+        assert_eq!(packet[..4], [0x42, 0x00, 0xbf, 0xf4]);
     }
 }

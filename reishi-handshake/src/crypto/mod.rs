@@ -1,7 +1,7 @@
 //! Cryptographic primitives for the Noise IK handshake.
 //!
 //! - [`aead`]: ChaChaPoly1305 AEAD encryption
-//! - [`hash`]: BLAKE2s hashing, HMAC, and HKDF
+//! - [`hash`]: SHA-512 hashing, HMAC, and HKDF
 //! - [`x25519`]: X25519 Diffie-Hellman with low-order point rejection
 
 pub mod aead;

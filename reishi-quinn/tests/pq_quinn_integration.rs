@@ -10,17 +10,16 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 
 use quinn::{ClientConfig, Endpoint, EndpointConfig, ServerConfig};
-use rand_core::OsRng;
 use reishi_quinn::{
     HybridKeyPair, HybridNoiseConfigBuilder, PeerIdentity, PeerPublicKey, PqKeyPair,
-    PqNoiseConfigBuilder, REISHI_PQ_HYBRID_V1_QUIC_V1, REISHI_PQ_KEM_V1_QUIC_V1,
+    PqNoiseConfigBuilder, REISHI_PQ_HYBRID_V2_QUIC_V1, REISHI_PQ_KEM_V2_QUIC_V1,
     noise_handshake_token_key, noise_hmac_key,
 };
 
 /// Build an EndpointConfig that supports the PQ QUIC version.
 fn pq_endpoint_config() -> EndpointConfig {
     let mut config = EndpointConfig::new(noise_hmac_key());
-    config.supported_versions(vec![REISHI_PQ_KEM_V1_QUIC_V1]);
+    config.supported_versions(vec![REISHI_PQ_KEM_V2_QUIC_V1]);
     config
 }
 
@@ -63,14 +62,14 @@ fn make_pq_client_config(kp: PqKeyPair, server_public: reishi_quinn::PqPublicKey
         .build_client_config()
         .unwrap();
     let mut config = ClientConfig::new(Arc::new(noise));
-    config.version(REISHI_PQ_KEM_V1_QUIC_V1);
+    config.version(REISHI_PQ_KEM_V2_QUIC_V1);
     config
 }
 
 /// Build an EndpointConfig that supports only the hybrid QUIC version.
 fn hybrid_endpoint_config() -> EndpointConfig {
     let mut config = EndpointConfig::new(noise_hmac_key());
-    config.supported_versions(vec![REISHI_PQ_HYBRID_V1_QUIC_V1]);
+    config.supported_versions(vec![REISHI_PQ_HYBRID_V2_QUIC_V1]);
 
     config
 }
@@ -130,7 +129,7 @@ fn make_hybrid_client_config(
         .unwrap();
     let mut config = ClientConfig::new(Arc::new(noise));
 
-    config.version(REISHI_PQ_HYBRID_V1_QUIC_V1);
+    config.version(REISHI_PQ_HYBRID_V2_QUIC_V1);
 
     config
 }
@@ -141,9 +140,9 @@ fn make_hybrid_client_config(
 
 #[tokio::test]
 async fn pq_handshake_and_bidirectional_data() {
-    let server_kp = PqKeyPair::generate(&mut OsRng);
+    let server_kp = PqKeyPair::generate();
     let server_public = server_kp.public.clone();
-    let client_kp = PqKeyPair::generate(&mut OsRng);
+    let client_kp = PqKeyPair::generate();
 
     let server = pq_server_endpoint(make_pq_server_config(server_kp));
     let server_addr = server.local_addr().unwrap();
@@ -184,9 +183,9 @@ async fn pq_handshake_and_bidirectional_data() {
 
 #[tokio::test]
 async fn pq_peer_identity_available() {
-    let server_kp = PqKeyPair::generate(&mut OsRng);
+    let server_kp = PqKeyPair::generate();
     let server_public = server_kp.public.clone();
-    let client_kp = PqKeyPair::generate(&mut OsRng);
+    let client_kp = PqKeyPair::generate();
     let client_public = client_kp.public.clone();
 
     let server = pq_server_endpoint(make_pq_server_config(server_kp));
@@ -235,7 +234,7 @@ async fn pq_peer_identity_available() {
 
 #[tokio::test]
 async fn pq_multiple_connections() {
-    let server_kp = PqKeyPair::generate(&mut OsRng);
+    let server_kp = PqKeyPair::generate();
     let server_public = server_kp.public.clone();
 
     let server = pq_server_endpoint(make_pq_server_config(server_kp));
@@ -243,7 +242,7 @@ async fn pq_multiple_connections() {
     let client = pq_client_endpoint();
 
     for i in 0u8..3 {
-        let client_kp = PqKeyPair::generate(&mut OsRng);
+        let client_kp = PqKeyPair::generate();
         let client_config = make_pq_client_config(client_kp, server_public.clone());
         let connecting = client
             .connect_with(client_config, server_addr, "server")
@@ -272,9 +271,9 @@ async fn pq_multiple_connections() {
 
 #[tokio::test]
 async fn pq_unidirectional_streams() {
-    let server_kp = PqKeyPair::generate(&mut OsRng);
+    let server_kp = PqKeyPair::generate();
     let server_public = server_kp.public.clone();
-    let client_kp = PqKeyPair::generate(&mut OsRng);
+    let client_kp = PqKeyPair::generate();
 
     let server = pq_server_endpoint(make_pq_server_config(server_kp));
     let server_addr = server.local_addr().unwrap();
@@ -309,9 +308,9 @@ async fn pq_unidirectional_streams() {
 
 #[tokio::test]
 async fn pq_wrong_server_key_rejected() {
-    let server_kp = PqKeyPair::generate(&mut OsRng);
-    let wrong_kp = PqKeyPair::generate(&mut OsRng);
-    let client_kp = PqKeyPair::generate(&mut OsRng);
+    let server_kp = PqKeyPair::generate();
+    let wrong_kp = PqKeyPair::generate();
+    let client_kp = PqKeyPair::generate();
 
     let server = pq_server_endpoint(make_pq_server_config(server_kp));
     let server_addr = server.local_addr().unwrap();
@@ -348,9 +347,9 @@ async fn pq_wrong_server_key_rejected() {
 
 #[tokio::test]
 async fn pq_export_keying_material() {
-    let server_kp = PqKeyPair::generate(&mut OsRng);
+    let server_kp = PqKeyPair::generate();
     let server_public = server_kp.public.clone();
-    let client_kp = PqKeyPair::generate(&mut OsRng);
+    let client_kp = PqKeyPair::generate();
 
     let server = pq_server_endpoint(make_pq_server_config(server_kp));
     let server_addr = server.local_addr().unwrap();
@@ -399,9 +398,9 @@ async fn pq_export_keying_material() {
 
 #[tokio::test]
 async fn pq_prologue_mismatch_rejected() {
-    let server_kp = PqKeyPair::generate(&mut OsRng);
+    let server_kp = PqKeyPair::generate();
     let server_public = server_kp.public.clone();
-    let client_kp = PqKeyPair::generate(&mut OsRng);
+    let client_kp = PqKeyPair::generate();
 
     let server_noise = PqNoiseConfigBuilder::new(server_kp)
         .with_prologue(b"server-prologue".to_vec())
@@ -419,7 +418,7 @@ async fn pq_prologue_mismatch_rejected() {
         .build_client_config()
         .unwrap();
     let mut client_config = ClientConfig::new(Arc::new(client_noise));
-    client_config.version(REISHI_PQ_KEM_V1_QUIC_V1);
+    client_config.version(REISHI_PQ_KEM_V2_QUIC_V1);
 
     let connecting = client
         .connect_with(client_config, server_addr, "server")
@@ -448,9 +447,9 @@ async fn pq_prologue_mismatch_rejected() {
 
 #[tokio::test]
 async fn pq_whitelisted_client_accepted() {
-    let server_kp = PqKeyPair::generate(&mut OsRng);
+    let server_kp = PqKeyPair::generate();
     let server_public = server_kp.public.clone();
-    let client_kp = PqKeyPair::generate(&mut OsRng);
+    let client_kp = PqKeyPair::generate();
     let client_public = client_kp.public.clone();
 
     let server = pq_server_endpoint(make_pq_server_config_with_allowed_keys(
@@ -488,10 +487,10 @@ async fn pq_whitelisted_client_accepted() {
 
 #[tokio::test]
 async fn pq_non_whitelisted_client_rejected() {
-    let server_kp = PqKeyPair::generate(&mut OsRng);
+    let server_kp = PqKeyPair::generate();
     let server_public = server_kp.public.clone();
-    let client_kp = PqKeyPair::generate(&mut OsRng);
-    let other_kp = PqKeyPair::generate(&mut OsRng);
+    let client_kp = PqKeyPair::generate();
+    let other_kp = PqKeyPair::generate();
 
     // Whitelist only other_kp, not the actual client
     let server = pq_server_endpoint(make_pq_server_config_with_allowed_keys(
@@ -529,9 +528,9 @@ async fn pq_non_whitelisted_client_rejected() {
 
 #[tokio::test]
 async fn pq_empty_whitelist_rejects_all() {
-    let server_kp = PqKeyPair::generate(&mut OsRng);
+    let server_kp = PqKeyPair::generate();
     let server_public = server_kp.public.clone();
-    let client_kp = PqKeyPair::generate(&mut OsRng);
+    let client_kp = PqKeyPair::generate();
 
     // Empty whitelist: no clients allowed
     let server = pq_server_endpoint(make_pq_server_config_with_allowed_keys(
@@ -569,9 +568,9 @@ async fn pq_empty_whitelist_rejects_all() {
 
 #[tokio::test]
 async fn hybrid_handshake_identity_streams_and_ekm() {
-    let server_keypair = HybridKeyPair::generate(&mut OsRng);
+    let server_keypair = HybridKeyPair::generate();
     let server_public = server_keypair.public.clone();
-    let client_keypair = HybridKeyPair::generate(&mut OsRng);
+    let client_keypair = HybridKeyPair::generate();
     let client_public = client_keypair.public.clone();
 
     let server = hybrid_server_endpoint(make_hybrid_server_config(server_keypair));
@@ -655,14 +654,14 @@ async fn hybrid_handshake_identity_streams_and_ekm() {
 
 #[tokio::test]
 async fn hybrid_multiple_connections() {
-    let server_keypair = HybridKeyPair::generate(&mut OsRng);
+    let server_keypair = HybridKeyPair::generate();
     let server_public = server_keypair.public.clone();
     let server = hybrid_server_endpoint(make_hybrid_server_config(server_keypair));
     let server_address = server.local_addr().unwrap();
     let client = hybrid_client_endpoint();
 
     for connection_index in 0u8..3 {
-        let client_keypair = HybridKeyPair::generate(&mut OsRng);
+        let client_keypair = HybridKeyPair::generate();
         let client_config = make_hybrid_client_config(client_keypair, server_public.clone());
         let connecting = client
             .connect_with(client_config, server_address, "server")
@@ -688,9 +687,9 @@ async fn hybrid_multiple_connections() {
 
 #[tokio::test]
 async fn hybrid_allowlist_accepts_only_authenticated_client() {
-    let server_keypair = HybridKeyPair::generate(&mut OsRng);
+    let server_keypair = HybridKeyPair::generate();
     let server_public = server_keypair.public.clone();
-    let client_keypair = HybridKeyPair::generate(&mut OsRng);
+    let client_keypair = HybridKeyPair::generate();
     let client_public = client_keypair.public.clone();
 
     let server = hybrid_server_endpoint(make_hybrid_server_config_with_allowed_keys(
@@ -715,10 +714,10 @@ async fn hybrid_allowlist_accepts_only_authenticated_client() {
 
 #[tokio::test]
 async fn hybrid_allowlist_rejects_unlisted_client() {
-    let server_keypair = HybridKeyPair::generate(&mut OsRng);
+    let server_keypair = HybridKeyPair::generate();
     let server_public = server_keypair.public.clone();
-    let client_keypair = HybridKeyPair::generate(&mut OsRng);
-    let other_keypair = HybridKeyPair::generate(&mut OsRng);
+    let client_keypair = HybridKeyPair::generate();
+    let other_keypair = HybridKeyPair::generate();
 
     let server = hybrid_server_endpoint(make_hybrid_server_config_with_allowed_keys(
         server_keypair,
@@ -754,15 +753,18 @@ async fn hybrid_allowlist_rejects_unlisted_client() {
 
 #[tokio::test]
 async fn pq_builders_reject_cross_suite_and_retired_versions() {
-    const RETIRED_PQ_VERSION: u32 = 0x52510201;
+    // 0x52510201: ad-hoc IKpq; 0x52510301 / 0x52510401: 0.4.0 BLAKE2s suites.
+    const RETIRED_PQ_VERSIONS: [u32; 3] = [0x52510201, 0x52510301, 0x52510401];
 
     // Advertise every candidate so rejection comes from the suite config,
     // rather than the endpoint's version filter.
     let mut endpoint_config = EndpointConfig::new(noise_hmac_key());
     endpoint_config.supported_versions(vec![
-        REISHI_PQ_KEM_V1_QUIC_V1,
-        REISHI_PQ_HYBRID_V1_QUIC_V1,
-        RETIRED_PQ_VERSION,
+        REISHI_PQ_KEM_V2_QUIC_V1,
+        REISHI_PQ_HYBRID_V2_QUIC_V1,
+        RETIRED_PQ_VERSIONS[0],
+        RETIRED_PQ_VERSIONS[1],
+        RETIRED_PQ_VERSIONS[2],
     ]);
 
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -770,25 +772,25 @@ async fn pq_builders_reject_cross_suite_and_retired_versions() {
     let endpoint = Endpoint::new(endpoint_config, None, socket, runtime).unwrap();
     let unused_address = "127.0.0.1:9".parse().unwrap();
 
-    let pq_server = PqKeyPair::generate(&mut OsRng);
-    let pq_client = PqKeyPair::generate(&mut OsRng);
+    let pq_server = PqKeyPair::generate();
+    let pq_client = PqKeyPair::generate();
     let pq_noise = PqNoiseConfigBuilder::new(pq_client)
         .with_remote_public(pq_server.public)
         .build_client_config()
         .unwrap();
     let mut pq_config = ClientConfig::new(Arc::new(pq_noise));
 
-    pq_config.version(REISHI_PQ_HYBRID_V1_QUIC_V1);
+    pq_config.version(REISHI_PQ_HYBRID_V2_QUIC_V1);
 
-    let hybrid_server = HybridKeyPair::generate(&mut OsRng);
-    let hybrid_client = HybridKeyPair::generate(&mut OsRng);
+    let hybrid_server = HybridKeyPair::generate();
+    let hybrid_client = HybridKeyPair::generate();
     let hybrid_noise = HybridNoiseConfigBuilder::new(hybrid_client)
         .with_remote_public(hybrid_server.public)
         .build_client_config()
         .unwrap();
     let mut hybrid_config = ClientConfig::new(Arc::new(hybrid_noise));
 
-    hybrid_config.version(REISHI_PQ_KEM_V1_QUIC_V1);
+    hybrid_config.version(REISHI_PQ_KEM_V2_QUIC_V1);
 
     assert!(
         endpoint
@@ -801,19 +803,22 @@ async fn pq_builders_reject_cross_suite_and_retired_versions() {
             .is_err(),
     );
 
-    let retired_server = PqKeyPair::generate(&mut OsRng);
-    let retired_client = PqKeyPair::generate(&mut OsRng);
-    let retired_noise = PqNoiseConfigBuilder::new(retired_client)
-        .with_remote_public(retired_server.public)
-        .build_client_config()
-        .unwrap();
-    let mut retired_config = ClientConfig::new(Arc::new(retired_noise));
+    for retired_version in RETIRED_PQ_VERSIONS {
+        // `connect_with` consumes the config, so each version needs a fresh one.
+        let retired_server = PqKeyPair::generate();
+        let retired_client = PqKeyPair::generate();
+        let retired_noise = PqNoiseConfigBuilder::new(retired_client)
+            .with_remote_public(retired_server.public)
+            .build_client_config()
+            .unwrap();
+        let mut retired_config = ClientConfig::new(Arc::new(retired_noise));
 
-    retired_config.version(RETIRED_PQ_VERSION);
+        retired_config.version(retired_version);
 
-    assert!(
-        endpoint
-            .connect_with(retired_config, unused_address, "server")
-            .is_err(),
-    );
+        assert!(
+            endpoint
+                .connect_with(retired_config, unused_address, "server")
+                .is_err(),
+        );
+    }
 }

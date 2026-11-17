@@ -1,6 +1,5 @@
 #![cfg(feature = "pq")]
 
-use rand_core::OsRng;
 use reishi_handshake::{
     Error, HandshakeAction, HybridHandshake, HybridKeyPair, PqHandshake, PqKeyPair,
 };
@@ -77,8 +76,8 @@ fn complete_hybrid_handshake(
 
 #[test]
 fn pq_three_flights_authenticate_before_exposing_identity() {
-    let initiator_keypair = PqKeyPair::generate(&mut OsRng);
-    let responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let initiator_keypair = PqKeyPair::generate();
+    let responder_keypair = PqKeyPair::generate();
     let mut initiator =
         PqHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
     let mut responder = PqHandshake::new_responder(&responder_keypair, &[]).unwrap();
@@ -133,8 +132,8 @@ fn pq_three_flights_authenticate_before_exposing_identity() {
 
 #[test]
 fn hybrid_three_flights_authenticate_before_exposing_identity() {
-    let initiator_keypair = HybridKeyPair::generate(&mut OsRng);
-    let responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let initiator_keypair = HybridKeyPair::generate();
+    let responder_keypair = HybridKeyPair::generate();
     let mut initiator =
         HybridHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
     let mut responder = HybridHandshake::new_responder(&responder_keypair, &[]).unwrap();
@@ -181,8 +180,8 @@ fn hybrid_three_flights_authenticate_before_exposing_identity() {
 
 #[test]
 fn pq_transcript_ask_and_transport_match() {
-    let initiator_keypair = PqKeyPair::generate(&mut OsRng);
-    let responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let initiator_keypair = PqKeyPair::generate();
+    let responder_keypair = PqKeyPair::generate();
     let (initiator, responder) = complete_pq_handshake(&initiator_keypair, &responder_keypair);
 
     assert_eq!(
@@ -210,8 +209,8 @@ fn pq_transcript_ask_and_transport_match() {
 
 #[test]
 fn hybrid_transcript_ask_and_transport_match() {
-    let initiator_keypair = HybridKeyPair::generate(&mut OsRng);
-    let responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let initiator_keypair = HybridKeyPair::generate();
+    let responder_keypair = HybridKeyPair::generate();
     let (initiator, responder) = complete_hybrid_handshake(&initiator_keypair, &responder_keypair);
 
     assert_eq!(
@@ -239,9 +238,9 @@ fn hybrid_transcript_ask_and_transport_match() {
 
 #[test]
 fn pq_rejects_truncation_tampering_and_wrong_key() {
-    let initiator_keypair = PqKeyPair::generate(&mut OsRng);
-    let responder_keypair = PqKeyPair::generate(&mut OsRng);
-    let wrong_responder = PqKeyPair::generate(&mut OsRng);
+    let initiator_keypair = PqKeyPair::generate();
+    let responder_keypair = PqKeyPair::generate();
+    let wrong_responder = PqKeyPair::generate();
     let mut message = vec![0u8; BUFFER_LEN];
     let mut payload = vec![0u8; BUFFER_LEN];
 
@@ -281,9 +280,9 @@ fn pq_rejects_truncation_tampering_and_wrong_key() {
 
 #[test]
 fn hybrid_rejects_truncation_tampering_and_wrong_key() {
-    let initiator_keypair = HybridKeyPair::generate(&mut OsRng);
-    let responder_keypair = HybridKeyPair::generate(&mut OsRng);
-    let wrong_responder = HybridKeyPair::generate(&mut OsRng);
+    let initiator_keypair = HybridKeyPair::generate();
+    let responder_keypair = HybridKeyPair::generate();
+    let wrong_responder = HybridKeyPair::generate();
     let mut message = vec![0u8; BUFFER_LEN];
     let mut payload = vec![0u8; BUFFER_LEN];
 
@@ -323,8 +322,8 @@ fn hybrid_rejects_truncation_tampering_and_wrong_key() {
 
 #[test]
 fn pq_rejects_truncated_messages_2_and_3() {
-    let initiator_keypair = PqKeyPair::generate(&mut OsRng);
-    let responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let initiator_keypair = PqKeyPair::generate();
+    let responder_keypair = PqKeyPair::generate();
     let mut message = vec![0u8; BUFFER_LEN];
     let mut payload = vec![0u8; BUFFER_LEN];
 
@@ -368,8 +367,8 @@ fn pq_rejects_truncated_messages_2_and_3() {
 
 #[test]
 fn hybrid_rejects_truncated_messages_2_and_3() {
-    let initiator_keypair = HybridKeyPair::generate(&mut OsRng);
-    let responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let initiator_keypair = HybridKeyPair::generate();
+    let responder_keypair = HybridKeyPair::generate();
     let mut message = vec![0u8; BUFFER_LEN];
     let mut payload = vec![0u8; BUFFER_LEN];
 
@@ -413,8 +412,8 @@ fn hybrid_rejects_truncated_messages_2_and_3() {
 
 #[test]
 fn pq_message_3_tampering_never_authenticates_responder_view() {
-    let initiator_keypair = PqKeyPair::generate(&mut OsRng);
-    let responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let initiator_keypair = PqKeyPair::generate();
+    let responder_keypair = PqKeyPair::generate();
     let mut initiator =
         PqHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
     let mut responder = PqHandshake::new_responder(&responder_keypair, &[]).unwrap();
@@ -444,8 +443,8 @@ fn pq_message_3_tampering_never_authenticates_responder_view() {
 
 #[test]
 fn hybrid_message_3_tampering_never_authenticates_responder_view() {
-    let initiator_keypair = HybridKeyPair::generate(&mut OsRng);
-    let responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let initiator_keypair = HybridKeyPair::generate();
+    let responder_keypair = HybridKeyPair::generate();
     let mut initiator =
         HybridHandshake::new_initiator(&initiator_keypair, &responder_keypair.public, &[]).unwrap();
     let mut responder = HybridHandshake::new_responder(&responder_keypair, &[]).unwrap();
@@ -474,9 +473,9 @@ fn hybrid_message_3_tampering_never_authenticates_responder_view() {
 
 #[test]
 fn forged_pq_identity_without_victim_secret_fails_confirmation() {
-    let attacker = PqKeyPair::generate(&mut OsRng);
-    let victim = PqKeyPair::generate(&mut OsRng);
-    let responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let attacker = PqKeyPair::generate();
+    let victim = PqKeyPair::generate();
+    let responder_keypair = PqKeyPair::generate();
     let victim_public = victim.public.clone();
     let forged_keypair = PqKeyPair {
         secret: attacker.secret,
@@ -507,9 +506,9 @@ fn forged_pq_identity_without_victim_secret_fails_confirmation() {
 
 #[test]
 fn forged_hybrid_identity_without_victim_secret_fails_confirmation() {
-    let attacker = HybridKeyPair::generate(&mut OsRng);
-    let victim = HybridKeyPair::generate(&mut OsRng);
-    let responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let attacker = HybridKeyPair::generate();
+    let victim = HybridKeyPair::generate();
+    let responder_keypair = HybridKeyPair::generate();
     let forged_keypair = HybridKeyPair {
         secret: attacker.secret,
         public: victim.public.clone(),
@@ -546,8 +545,8 @@ fn pq_and_hybrid_writers_enforce_message_limit() {
     let mut message = vec![0u8; OVERSIZED_BUFFER_LEN];
     let mut payload_output = vec![0u8; BUFFER_LEN];
 
-    let pq_initiator_keypair = PqKeyPair::generate(&mut OsRng);
-    let pq_responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let pq_initiator_keypair = PqKeyPair::generate();
+    let pq_responder_keypair = PqKeyPair::generate();
     let mut pq_initiator =
         PqHandshake::new_initiator(&pq_initiator_keypair, &pq_responder_keypair.public, &[])
             .unwrap();
@@ -596,8 +595,8 @@ fn pq_and_hybrid_writers_enforce_message_limit() {
         BUFFER_LEN,
     );
 
-    let hybrid_initiator_keypair = HybridKeyPair::generate(&mut OsRng);
-    let hybrid_responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let hybrid_initiator_keypair = HybridKeyPair::generate();
+    let hybrid_responder_keypair = HybridKeyPair::generate();
     let mut hybrid_initiator = HybridHandshake::new_initiator(
         &hybrid_initiator_keypair,
         &hybrid_responder_keypair.public,
@@ -659,8 +658,8 @@ fn pq_and_hybrid_payload_buffer_errors_are_retryable() {
     let mut payload_output = vec![0u8; BUFFER_LEN];
     let responder_payload = b"responder payload";
 
-    let pq_initiator_keypair = PqKeyPair::generate(&mut OsRng);
-    let pq_responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let pq_initiator_keypair = PqKeyPair::generate();
+    let pq_responder_keypair = PqKeyPair::generate();
     let mut pq_initiator =
         PqHandshake::new_initiator(&pq_initiator_keypair, &pq_responder_keypair.public, &[])
             .unwrap();
@@ -695,8 +694,8 @@ fn pq_and_hybrid_payload_buffer_errors_are_retryable() {
         pq_responder.handshake_hash().unwrap(),
     );
 
-    let hybrid_initiator_keypair = HybridKeyPair::generate(&mut OsRng);
-    let hybrid_responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let hybrid_initiator_keypair = HybridKeyPair::generate();
+    let hybrid_responder_keypair = HybridKeyPair::generate();
     let mut hybrid_initiator = HybridHandshake::new_initiator(
         &hybrid_initiator_keypair,
         &hybrid_responder_keypair.public,
@@ -738,15 +737,15 @@ fn pq_and_hybrid_payload_buffer_errors_are_retryable() {
 
 #[test]
 fn pq_and_hybrid_reject_cross_suite_message_splices() {
-    let pq_initiator_keypair = PqKeyPair::generate(&mut OsRng);
-    let pq_responder_keypair = PqKeyPair::generate(&mut OsRng);
+    let pq_initiator_keypair = PqKeyPair::generate();
+    let pq_responder_keypair = PqKeyPair::generate();
     let mut pq_initiator =
         PqHandshake::new_initiator(&pq_initiator_keypair, &pq_responder_keypair.public, &[])
             .unwrap();
     let mut pq_responder = PqHandshake::new_responder(&pq_responder_keypair, &[]).unwrap();
 
-    let hybrid_initiator_keypair = HybridKeyPair::generate(&mut OsRng);
-    let hybrid_responder_keypair = HybridKeyPair::generate(&mut OsRng);
+    let hybrid_initiator_keypair = HybridKeyPair::generate();
+    let hybrid_responder_keypair = HybridKeyPair::generate();
     let mut hybrid_initiator = HybridHandshake::new_initiator(
         &hybrid_initiator_keypair,
         &hybrid_responder_keypair.public,
@@ -777,8 +776,8 @@ fn pq_and_hybrid_reject_cross_suite_message_splices() {
 
 #[test]
 fn pq_and_hybrid_reject_wrong_state_calls() {
-    let pq_initiator = PqKeyPair::generate(&mut OsRng);
-    let pq_responder = PqKeyPair::generate(&mut OsRng);
+    let pq_initiator = PqKeyPair::generate();
+    let pq_responder = PqKeyPair::generate();
     let mut pq = PqHandshake::new_initiator(&pq_initiator, &pq_responder.public, &[]).unwrap();
     let mut output = [0u8; BUFFER_LEN];
 
@@ -787,8 +786,8 @@ fn pq_and_hybrid_reject_wrong_state_calls() {
         Err(Error::WrongState),
     );
 
-    let hybrid_initiator = HybridKeyPair::generate(&mut OsRng);
-    let hybrid_responder = HybridKeyPair::generate(&mut OsRng);
+    let hybrid_initiator = HybridKeyPair::generate();
+    let hybrid_responder = HybridKeyPair::generate();
     let mut hybrid = HybridHandshake::new_responder(&hybrid_responder, &[]).unwrap();
 
     assert_eq!(

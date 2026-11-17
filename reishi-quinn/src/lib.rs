@@ -16,9 +16,8 @@
 //!
 //! ```rust,no_run
 //! use reishi_quinn::{NoiseConfigBuilder, KeyPair};
-//! use rand_core::OsRng;
 //!
-//! let server_keypair = KeyPair::generate(&mut OsRng);
+//! let server_keypair = KeyPair::generate();
 //! let server_public = server_keypair.public;
 //!
 //! // Server config
@@ -27,7 +26,7 @@
 //!     .unwrap();
 //!
 //! // Client config (needs server's public key)
-//! let client_keypair = KeyPair::generate(&mut OsRng);
+//! let client_keypair = KeyPair::generate();
 //! let client_config = NoiseConfigBuilder::new(client_keypair)
 //!     .with_remote_public(server_public)
 //!     .build_client_config()
@@ -70,18 +69,18 @@ use crate::token::{NoiseHandshakeTokenKey, NoiseHmacKey};
 use quinn_proto::transport_parameters::TransportParameters;
 use quinn_proto::{ConnectError, ConnectionId, crypto};
 
-/// Custom QUIC version number for Reishi v1 over QUIC v1.
+/// Custom QUIC version number for Reishi v2 (SHA-512) over QUIC v1.
 ///
-/// Encodes as `"RQ\x01\x01"` in the version field.
-pub const REISHI_V1_QUIC_V1: u32 = 0x52510101;
+/// Encodes as `"RQ\x05\x01"` in the version field.
+pub const REISHI_V2_QUIC_V1: u32 = 0x52510501;
 
-/// Custom QUIC version number for Reishi KEM-only pqIK over QUIC v1.
+/// Custom QUIC version number for Reishi v2 (SHA-512) KEM-only pqIK over QUIC v1.
 #[cfg(feature = "pq")]
-pub const REISHI_PQ_KEM_V1_QUIC_V1: u32 = 0x52510301;
+pub const REISHI_PQ_KEM_V2_QUIC_V1: u32 = 0x52510601;
 
-/// Custom QUIC version number for Reishi hybrid IK + pqIK over QUIC v1.
+/// Custom QUIC version number for Reishi v2 (SHA-512) hybrid IK + pqIK over QUIC v1.
 #[cfg(feature = "pq")]
-pub const REISHI_PQ_HYBRID_V1_QUIC_V1: u32 = 0x52510401;
+pub const REISHI_PQ_HYBRID_V2_QUIC_V1: u32 = 0x52510701;
 
 /// Label used to derive initial-level secrets from the client's DCID.
 pub const INITIAL_LABEL: &[u8] = b"reishi initial";
@@ -125,8 +124,8 @@ pub enum PeerPublicKey {
 pub struct PeerIdentity {
     /// The peer's authenticated static public key.
     pub public_key: PeerPublicKey,
-    /// The final Noise handshake hash (channel binding value, 32 bytes).
-    pub handshake_hash: [u8; 32],
+    /// The final Noise handshake hash (channel binding value, 64 bytes).
+    pub handshake_hash: [u8; reishi_handshake::crypto::hash::HASH_LEN],
 }
 
 /// Shared configuration for both client and server sessions.
@@ -151,7 +150,7 @@ impl crypto::ClientConfig for NoiseClientConfig {
         _server_name: &str,
         params: &TransportParameters,
     ) -> Result<Box<dyn crypto::Session>, ConnectError> {
-        if version != REISHI_V1_QUIC_V1 {
+        if version != REISHI_V2_QUIC_V1 {
             return Err(ConnectError::UnsupportedVersion);
         }
 
@@ -177,7 +176,7 @@ impl crypto::ServerConfig for NoiseServerConfig {
         version: u32,
         dst_cid: &ConnectionId,
     ) -> Result<crypto::Keys, crypto::UnsupportedVersion> {
-        if version != REISHI_V1_QUIC_V1 {
+        if version != REISHI_V2_QUIC_V1 {
             return Err(crypto::UnsupportedVersion);
         }
 
@@ -186,7 +185,7 @@ impl crypto::ServerConfig for NoiseServerConfig {
     }
 
     fn retry_tag(&self, version: u32, orig_dst_cid: &ConnectionId, packet: &[u8]) -> [u8; 16] {
-        if version != REISHI_V1_QUIC_V1 {
+        if version != REISHI_V2_QUIC_V1 {
             return [0u8; 16];
         }
 
@@ -198,7 +197,7 @@ impl crypto::ServerConfig for NoiseServerConfig {
         version: u32,
         params: &TransportParameters,
     ) -> Box<dyn crypto::Session> {
-        if version != REISHI_V1_QUIC_V1 {
+        if version != REISHI_V2_QUIC_V1 {
             return Box::new(NoiseSession::failed());
         }
 
@@ -216,9 +215,8 @@ impl crypto::ServerConfig for NoiseServerConfig {
 ///
 /// ```rust,no_run
 /// use reishi_quinn::{NoiseConfigBuilder, KeyPair, PublicKey};
-/// use rand_core::OsRng;
 ///
-/// let keypair = KeyPair::generate(&mut OsRng);
+/// let keypair = KeyPair::generate();
 /// let server_pub = PublicKey::from_bytes([0u8; 32]); // placeholder
 ///
 /// let client = NoiseConfigBuilder::new(keypair)

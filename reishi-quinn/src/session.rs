@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn malformed_confirmation_framing_fails_the_session() {
-        let remote_keypair = reishi_handshake::KeyPair::generate(&mut rand_core::OsRng);
+        let remote_keypair = reishi_handshake::KeyPair::generate();
         let mut session = test_session();
 
         session.state = HandshakeState::AwaitingDataKeys {

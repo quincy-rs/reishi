@@ -1,15 +1,17 @@
 use core::hash::{Hash, Hasher};
 
-use rand_core::CryptoRngCore;
+use aws_lc_rs::agreement;
 use subtle::ConstantTimeEq;
-use x25519_dalek::{PublicKey as DalekPublicKey, StaticSecret as DalekStaticSecret};
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::Zeroizing;
+
+use crate::crypto::x25519;
+use crate::error::Error;
 
 /// An X25519 static secret key.
 ///
 /// Zeroized from memory when dropped.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct StaticSecret(DalekStaticSecret);
+#[derive(Clone)]
+pub struct StaticSecret(Zeroizing<[u8; Self::LEN]>);
 
 impl StaticSecret {
     /// The length of a static secret key in bytes.
@@ -17,27 +19,17 @@ impl StaticSecret {
 
     /// Create from raw 32-byte secret key material.
     pub fn from_bytes(bytes: &[u8; Self::LEN]) -> Self {
-        let mut copy = *bytes;
-        // DalekStaticSecret::from takes [u8; 32] by value, so a by-value copy
-        // lands on its stack frame. We cannot zeroize that copy, but it lives in
-        // dead stack space once the call returns and is quickly overwritten.
-        let secret = Self(DalekStaticSecret::from(copy));
-        copy.zeroize();
-        secret
-    }
-
-    /// Wrap an existing `DalekStaticSecret`.
-    pub(crate) fn from_dalek(secret: DalekStaticSecret) -> Self {
-        Self(secret)
+        Self(Zeroizing::new(*bytes))
     }
 
     /// Export the raw 32-byte secret key material.
     pub fn to_bytes(&self) -> Zeroizing<[u8; Self::LEN]> {
-        Zeroizing::new(self.0.to_bytes())
+        self.0.clone()
     }
 
-    pub(crate) fn inner(&self) -> &DalekStaticSecret {
-        &self.0
+    /// Import this secret into aws-lc for DH operations.
+    pub(crate) fn private_key(&self) -> Result<agreement::PrivateKey, Error> {
+        x25519::private_key(&self.0)
     }
 }
 
@@ -93,22 +85,22 @@ pub struct KeyPair {
 }
 
 impl KeyPair {
-    /// Generate a new random keypair using the provided RNG.
-    pub fn generate(rng: &mut impl CryptoRngCore) -> Self {
-        let secret = DalekStaticSecret::random_from_rng(rng);
-        let public = DalekPublicKey::from(&secret);
-        Self {
-            secret: StaticSecret(secret),
-            public: PublicKey(public.to_bytes()),
-        }
+    /// Generate a new random keypair from aws-lc's CSPRNG.
+    pub fn generate() -> Self {
+        let mut secret = Zeroizing::new([0u8; StaticSecret::LEN]);
+        aws_lc_rs::rand::fill(&mut secret[..]).expect("aws-lc CSPRNG failed");
+        Self::from_secret(StaticSecret(secret))
     }
 
     /// Create a keypair from an existing static secret.
     pub fn from_secret(secret: StaticSecret) -> Self {
-        let public = DalekPublicKey::from(secret.inner());
+        let public = secret
+            .private_key()
+            .and_then(|key| x25519::public_key(&key))
+            .expect("aws-lc derives an X25519 public key for every 32-byte secret");
         Self {
             secret,
-            public: PublicKey(public.to_bytes()),
+            public: PublicKey(public),
         }
     }
 
@@ -130,30 +122,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_secret_bytes_matches_manual_construction() {
-        let bytes = [42u8; 32];
+    fn from_secret_derives_rfc7748_public_key() {
+        // RFC 7748 Section 6.1, Alice.
+        let secret: [u8; 32] =
+            hex::decode("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let public =
+            hex::decode("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+                .unwrap();
 
-        let from_helper = KeyPair::from_secret_bytes(&bytes);
-
-        let secret = DalekStaticSecret::from(bytes);
-        let public = DalekPublicKey::from(&secret);
-        let manual = KeyPair {
-            secret: StaticSecret(secret),
-            public: PublicKey(public.to_bytes()),
-        };
-
-        assert_eq!(from_helper.public.as_bytes(), manual.public.as_bytes());
-    }
-
-    #[test]
-    fn from_secret_derives_correct_public_key() {
-        let bytes = [42u8; 32];
-        let secret = StaticSecret::from_bytes(&bytes);
-        let expected_public = DalekPublicKey::from(&DalekStaticSecret::from(bytes)).to_bytes();
-
-        let kp = KeyPair::from_secret(secret);
-
-        assert_eq!(*kp.public.as_bytes(), expected_public);
+        assert_eq!(
+            KeyPair::from_secret_bytes(&secret).public.as_bytes()[..],
+            public[..]
+        );
     }
 
     #[test]

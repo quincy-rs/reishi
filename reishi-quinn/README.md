@@ -13,14 +13,12 @@
 Reishi connections use custom QUIC version numbers to distinguish themselves from TLS 1.3:
 
 ```
-REISHI_V1_QUIC_V1:    0x52510101  // "RQ\x01\x01"
-REISHI_PQ_KEM_V1_QUIC_V1:    0x52510301  // KEM-only pqIK
-REISHI_PQ_HYBRID_V1_QUIC_V1: 0x52510401  // hybrid IK + pqIK
+REISHI_V2_QUIC_V1:           0x52510501  // "RQ\x05\x01"
+REISHI_PQ_KEM_V2_QUIC_V1:    0x52510601  // KEM-only pqIK
+REISHI_PQ_HYBRID_V2_QUIC_V1: 0x52510701  // hybrid IK + pqIK
 ```
 
 The selected QUIC version is domain-separated and mixed into the Noise prologue, preventing transcript reuse if a future QUIC version keeps the same Noise ciphersuite name.
-
-The former post-quantum wire version `0x52510201` is retired. It used the removed ad-hoc IKpq construction and is intentionally incompatible with both confirmed suites.
 
 ### Key derivation
 
@@ -54,10 +52,9 @@ Handshake messages are prefixed with a QUIC VarInt length for transmission over 
 ```rust
 use reishi_quinn::NoiseConfigBuilder;
 use reishi_handshake::KeyPair;
-use rand_core::OsRng;
 
-let server_kp = KeyPair::generate(&mut OsRng);
-let client_kp = KeyPair::generate(&mut OsRng);
+let server_kp = KeyPair::generate();
+let client_kp = KeyPair::generate();
 
 // Or load from existing secret key material
 // let server_kp = KeyPair::from_secret_bytes(secret_bytes);
